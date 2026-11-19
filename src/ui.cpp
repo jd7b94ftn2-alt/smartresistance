@@ -397,6 +397,7 @@ const char* pageTitle(Page page) {
         case Page::Desk: return tr("桌面", "Desk");
         case Page::Macro: return tr("快捷键", "Shortcuts");
         case Page::Pomodoro: return tr("计时", "Timer");
+        case Page::NtcPick: return tr("NTC 规格", "NTC type");
         default: return "";
     }
 }
@@ -671,6 +672,9 @@ void renderResistor() {
         st.outputEnabled ? Style::On : Style::Muted, Font::Large, resistorField == 6);
 }
 
+String ohmsShort(double ohms);
+void openNtcPicker();
+
 const Rect kNtcType = {10, 30, 300, 34};
 const Rect kNtcStep[4] = {{10, 140, 72, 32}, {86, 140, 72, 32}, {162, 140, 72, 32}, {238, 140, 72, 32}};
 const double kNtcStepValue[4] = {-1.0, -0.1, 0.1, 1.0};
@@ -682,8 +686,11 @@ void staticNtc() {
 }
 
 void renderNtc() {
-    button(0, kNtcType, "<    " + ntcTypeName(app::settings().ntcPreset) + "    >", Style::Normal, Font::Large, ntcField == 0);
-    label(1, 14, 70, 296, "R25 " + String(app::ntcR25(), 0) + " Ω    B " + String(app::ntcBeta(), 0), Font::Small, kDim);
+    button(0, kNtcType, ohmsShort(app::ntcR25()) + "  ·  B" + String(static_cast<long>(std::round(app::ntcBeta())))
+        + tr("   选规格 ›", "   change ›"), Style::Normal, Font::Large, ntcField == 0);
+    const bool user = app::settings().ntcPreset == app::ntcTypeCount() - 1;
+    label(1, 14, 70, 296, String(user ? tr("自定义规格", "Custom") : tr("常用型号", "Preset")) + "   R25 "
+        + String(app::ntcR25(), 0) + " Ω    B " + String(app::ntcBeta(), 0), Font::Small, kDim);
     bigNumber(2, 238, 87, 224, String(ntcEditTemp, 1), kFg, TR_DATUM, kCard);
     const char* names[4] = {"-1", "-0.1", "+0.1", "+1"};
     for (int i = 0; i < 4; ++i) {
@@ -721,9 +728,153 @@ void stepNtc(double delta) {
     applyNtcEdit();
 }
 
-void stepNtcType(int steps) {
-    app::selectNtc(wrap(app::settings().ntcPreset + steps, app::ntcTypeCount()));
+// ------------------------------------------------------------ NTC spec picker: R25 column + B column
+const std::uint32_t kPickR25[] = {1000, 2000, 2200, 3000, 4700, 5000, 6800, 10000, 12000, 15000,
+    20000, 22000, 30000, 47000, 50000, 68000, 100000, 150000, 200000, 470000};
+const std::uint16_t kPickBeta[] = {3270, 3380, 3435, 3470, 3500, 3600, 3650, 3700, 3740, 3850,
+    3900, 3950, 3977, 4050, 4100, 4150, 4250, 4300, 4500, 4700};
+constexpr int kPickR25Count = sizeof(kPickR25) / sizeof(kPickR25[0]);
+constexpr int kPickBetaCount = sizeof(kPickBeta) / sizeof(kPickBeta[0]);
+constexpr int kPickRows = 5;
+constexpr int kPickRowH = 27;
+const Rect kPickColumn[2] = {{8, 54, 148, 143}, {164, 54, 148, 143}};
+const Rect kPickCancel = {8, 202, 148, 34};
+const Rect kPickOk = {164, 202, 148, 34};
+int pickR25 = 7;
+int pickBeta = 2;
+int pickFocus = 0;                    // 0 R25 column, 1 B column, 2 OK, 3 cancel
+
+String ohmsShort(double ohms) {
+    if (ohms >= 1000.0) {
+        const double k = ohms / 1000.0;
+        return (std::fabs(k - std::round(k)) < 0.01 ? String(static_cast<long>(std::round(k))) : String(k, 1)) + "k";
+    }
+    return String(static_cast<long>(std::round(ohms)));
+}
+
+template <typename T>
+int nearestIndex(const T* values, int count, double target) {
+    int best = 0;
+    for (int i = 1; i < count; ++i) {
+        if (std::fabs(values[i] - target) < std::fabs(values[best] - target)) {
+            best = i;
+        }
+    }
+    return best;
+}
+
+int pickFirstRow(int selected, int count) {
+    return std::max(0, std::min(count - kPickRows, selected - kPickRows / 2));
+}
+
+void openNtcPicker() {
+    pickR25 = nearestIndex(kPickR25, kPickR25Count, app::ntcR25());
+    pickBeta = nearestIndex(kPickBeta, kPickBetaCount, app::ntcBeta());
+    pickFocus = 0;
+    setPage(Page::NtcPick);
+}
+
+void drawPickColumn(int col) {
+    const Rect& r = kPickColumn[col];
+    const int selected = col == 0 ? pickR25 : pickBeta;
+    const int count = col == 0 ? kPickR25Count : kPickBetaCount;
+    tft.fillRect(r.x, r.y, r.w, r.h, kBg);
+    if (pickFocus == col) {
+        panel(r.x, r.y, r.w, r.h, 10, kAccent);
+        panel(r.x + 2, r.y + 2, r.w - 4, r.h - 4, 8, kCard, kAccent);
+    } else {
+        panel(r.x, r.y, r.w, r.h, 10, kCard);
+    }
+    const int first = pickFirstRow(selected, count);
+    for (int row = 0; row < kPickRows; ++row) {
+        const int index = first + row;
+        const int y = r.y + 4 + row * kPickRowH;
+        const bool sel = index == selected;
+        if (sel) {
+            tft.fillSmoothRoundRect(r.x + 8, y + 1, r.w - 16, kPickRowH - 2, 8, pickFocus == col ? kAccent : kButton, kCard);
+        }
+        const String value = col == 0 ? ohmsShort(kPickR25[index]) : String("B") + String(kPickBeta[index]);
+        text(value, r.x + r.w / 2, y + kPickRowH / 2, sel ? Font::Large : Font::Small, sel ? kWhite : kDim,
+            sel ? (pickFocus == col ? kAccent : kButton) : kCard, 0, MC_DATUM, 2);
+    }
+}
+
+void renderNtcPick() {
+    label(0, 82, 32, 150, tr("阻值 R25", "R25"), Font::Small, pickFocus == 0 ? kAccent : kDim, TC_DATUM);
+    label(1, 238, 32, 150, tr("B 值", "Beta"), Font::Small, pickFocus == 1 ? kAccent : kDim, TC_DATUM);
+    for (int col = 0; col < 2; ++col) {
+        const int selected = col == 0 ? pickR25 : pickBeta;
+        if (changed(10 + col, "", static_cast<std::uint32_t>(selected) * 8U + (pickFocus == col ? 1U : 0U))) {
+            drawPickColumn(col);
+        }
+    }
+    button(2, kPickCancel, tr("取消", "Cancel"), Style::Normal, Font::Large, pickFocus == 3);
+    button(3, kPickOk, String(tr("确定 ", "OK ")) + ohmsShort(kPickR25[pickR25]) + " B" + String(kPickBeta[pickBeta]),
+        Style::Accent, Font::Small, pickFocus == 2);
+}
+
+// Uses the matching built-in type when there is one, otherwise the user-defined slot.
+void applyNtcPick() {
+    const double r25 = kPickR25[pickR25];
+    const double beta = kPickBeta[pickBeta];
+    int preset = -1;
+    for (std::size_t i = 0; i < smart_resistance::kNtcPresetCount; ++i) {
+        if (std::fabs(smart_resistance::kNtcPresets[i].r25Ohms - r25) < 0.5
+            && std::fabs(smart_resistance::kNtcPresets[i].beta - beta) < 0.5) {
+            preset = static_cast<int>(i);
+        }
+    }
+    if (preset >= 0) {
+        app::selectNtc(preset);
+    } else {
+        app::setUserNtc(r25, beta);
+    }
+    app::saveSettings();
     applyNtcEdit();
+    setPage(Page::Ntc);
+}
+
+Tap ntcPickTouch(int x, int y) {
+    for (int col = 0; col < 2; ++col) {
+        const Rect& r = kPickColumn[col];
+        if (r.contains(x, y)) {
+            const int count = col == 0 ? kPickR25Count : kPickBetaCount;
+            int& selected = col == 0 ? pickR25 : pickBeta;
+            const int row = std::max(0, std::min(kPickRows - 1, (y - r.y - 4) / kPickRowH));
+            selected = std::min(count - 1, pickFirstRow(selected, count) + row);   // tapping an edge row scrolls
+            pickFocus = col;
+            return Tap::Done;
+        }
+    }
+    if (kPickOk.contains(x, y)) {
+        applyNtcPick();
+        return Tap::Done;
+    }
+    if (kPickCancel.contains(x, y)) {
+        setPage(Page::Ntc);
+        return Tap::Done;
+    }
+    return Tap::None;
+}
+
+void ntcPickRotate(int steps) {
+    if (pickFocus == 0) {
+        pickR25 = std::max(0, std::min(kPickR25Count - 1, pickR25 + steps));
+    } else if (pickFocus == 1) {
+        pickBeta = std::max(0, std::min(kPickBetaCount - 1, pickBeta + steps));
+    } else {
+        pickFocus = pickFocus == 2 ? 3 : 2;
+    }
+}
+
+void ntcPickPress() {
+    if (pickFocus == 2) {
+        applyNtcPick();
+    } else if (pickFocus == 3) {
+        setPage(Page::Ntc);
+    } else {
+        ++pickFocus;           // R25 -> B -> OK
+    }
 }
 
 const Rect kBleMode[2] = {{10, 98, 148, 36}, {162, 98, 148, 36}};
@@ -1788,6 +1939,7 @@ void renderPage() {
         case Page::Desk: renderDesk(); break;
         case Page::Macro: renderMacro(); break;
         case Page::Pomodoro: renderPomodoro(); break;
+        case Page::NtcPick: renderNtcPick(); break;
         default: break;
     }
 }
@@ -1856,6 +2008,9 @@ Tap onTouch(int x, int y) {
         case Page::Pomodoro:
             return timerTouch(x, y);
 
+        case Page::NtcPick:
+            return ntcPickTouch(x, y);
+
         case Page::Menu:
             for (int i = 0; i < kHomeCount; ++i) {
                 if (homeTile(i).contains(x, y)) {
@@ -1887,7 +2042,7 @@ Tap onTouch(int x, int y) {
         case Page::Ntc:
             if (kNtcType.contains(x, y)) {
                 ntcField = 0;
-                stepNtcType(x < kNtcType.x + kNtcType.w / 2 ? -1 : 1);
+                openNtcPicker();
                 return Tap::Done;
             }
             for (int i = 0; i < 4; ++i) {
@@ -2084,10 +2239,14 @@ void onRotate(int steps) {
                 }
                 app::setOutput(steps > 0);
             } else if (ntcField == 0) {
-                stepNtcType(steps);
+                openNtcPicker();          // two-column R25 / B picker
             } else {
                 stepNtc(steps * (ntcField == 1 ? 1.0 : 0.1));
             }
+            break;
+
+        case Page::NtcPick:
+            ntcPickRotate(steps);
             break;
 
         case Page::Bluetooth:
@@ -2225,6 +2384,9 @@ void onShortPress() {
             break;
         case Page::Pomodoro:
             pomoStartPause();
+            break;
+        case Page::NtcPick:
+            ntcPickPress();
             break;
         case Page::TouchCal:
             config.touchSkipped = true;

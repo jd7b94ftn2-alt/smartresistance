@@ -22,6 +22,7 @@ enum class Page : std::uint8_t {
     Desk,
     Macro,
     Pomodoro,
+    NtcPick,
     Count,
 };
 
