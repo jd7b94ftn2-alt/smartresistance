@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SmartResistance 远程控制</title>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<style>
+:root { --bg:#12161c; --card:#1d242e; --fg:#e8edf2; --dim:#93a1b3; --line:#3a4656; --blue:#2b6cb0; --green:#2f855a; --red:#9b2c2c; }
+* { box-sizing:border-box; }
+body { font-family:system-ui,"Microsoft YaHei",sans-serif; margin:0; padding:12px; background:var(--bg); color:var(--fg); }
+h1 { font-size:18px; margin:0 0 10px; }
+.card { background:var(--card); border-radius:8px; padding:12px; margin-bottom:10px; max-width:720px; }
+.row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px; }
+input, select, button { font-size:15px; padding:8px; border-radius:6px; border:1px solid var(--line); background:#0f1319; color:var(--fg); min-width:0; }
+input { flex:1 1 140px; }
+button { background:var(--blue); border:0; cursor:pointer; }
+button.on { background:var(--green); } button.off { background:var(--red); }
+.big { font-size:34px; font-weight:600; }
+small, .dim { color:var(--dim); }
+.dot { display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--red); margin-right:6px; vertical-align:middle; }
+.dot.ok { background:#48bb78; }
+pre { background:#0f1319; padding:8px; border-radius:6px; white-space:pre-wrap; max-height:260px; overflow:auto; margin:8px 0 0; }
+</style>
+</head>
+<body>
+<h1>SmartResistance 远程控制</h1>
+
+<div class="card">
+  <b>连接服务器</b>
+  <div class="row"><input id="url" placeholder="wss://xxxx.emqxsl.cn:8084/mqtt"></div>
+  <div class="row"><input id="user" placeholder="用户名"><input id="pass" type="password" placeholder="密码"></div>
+  <div class="row"><input id="topic" placeholder="设备主题，例如 smartr/a0b1c2d3e4f5（板子上发 MQTT? 查看）"></div>
+  <div class="row"><button id="connect">连接</button><span id="status"><span class="dot"></span>未连接</span></div>
+  <small>浏览器只会把这些信息存在本机，不会上传到别处。</small>
+</div>
+
+<div class="card">
+  <div class="big" id="r">-</div>
+  <small id="info">等待设备状态…</small>
+  <div class="row">
+    <input id="rv" placeholder="阻值，例如 4.7k">
+    <button onclick="send('R ' + v('rv'))">设置电阻</button>
+    <button id="out" onclick="send('OUT ' + (state.out ? 0 : 1))">输出</button>
+  </div>
+</div>
+
+<div class="card">
+  <b>NTC 温度</b>
+  <div class="row">
+    <select id="ntc" onchange="send('NTCSEL ' + this.value)"></select>
+    <input id="tv" placeholder="温度 ℃">
+    <button onclick="send('NTC ' + v('tv'))">设置温度</button>
+  </div>
+  <div class="row">
+    <input id="s0" placeholder="起始 ℃"><input id="s1" placeholder="结束 ℃">
+    <input id="s2" placeholder="步进 ℃"><input id="s3" placeholder="每步停留 ms">
+  </div>
+  <div class="row">
+    <button onclick="send(['SWEEP', v('s0'), v('s1'), v('s2'), v('s3')].join(' '))">开始扫描</button>
+    <button class="off" onclick="send('SWEEP STOP')">停止扫描</button>
+  </div>
+</div>
+
+<div class="card">
+  <b>指令</b> <small>和 USB 串口相同，发 HELP 查看全部</small>
+  <div class="row"><input id="cmd" placeholder="例如 STAT?"><button onclick="send(v('cmd'))">发送</button></div>
+  <pre id="log"></pre>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const v = id => $(id).value.trim();
+let client = null, base = '', state = {};
+const saved = ['url', 'user', 'pass', 'topic'];
+for (const k of saved) { try { $(k).value = localStorage.getItem('sr_' + k) || ''; } catch (e) {} }
+
+function log(text) {
+  const t = new Date().toLocaleTimeString();
+  $('log').textContent = '[' + t + '] ' + text + '\n' + $('log').textContent.slice(0, 6000);
+}
+
+function setStatus(ok, text) {
+  $('status').innerHTML = '<span class="dot' + (ok ? ' ok' : '') + '"></span>' + text;
+}
+
+function send(text) {
+  if (!text) return;
+  if (!client || !client.connected) { log('未连接服务器'); return; }
+  client.publish(base + '/cmd', text, { qos: 1 });
+  log('> ' + text);
+}
+
+function showState(s) {
+  state = s;
+  $('r').textContent = s.r + ' Ω';
+  const mode = s.mode === 'NTC' ? 'NTC ' + s.t + ' ℃' : (s.mode === 'RAW' ? '继电器手动模式' : '电阻模式');
+  $('info').textContent = mode + ' | 实际 ' + s.est + ' Ω | 板温 ' + (s.board === null ? '-' : s.board + ' ℃') + (s.fault ? ' | 故障' : '');
+  const out = $('out');
+  out.textContent = s.out ? '输出：开' : '输出：关';
+  out.className = s.out ? 'on' : 'off';
+  const sel = $('ntc');
+  if (!sel.options.length && s.types) s.types.forEach((n, i) => sel.add(new Option(n, i)));
+  sel.value = s.ntc;
+}
+
+$('connect').onclick = () => {
+  for (const k of saved) { try { localStorage.setItem('sr_' + k, $(k).value); } catch (e) {} }
+  if (client) { client.end(true); client = null; }
+  base = v('topic').replace(/\/+$/, '');
+  if (!v('url') || !base) { setStatus(false, '请填写服务器地址和设备主题'); return; }
+  setStatus(false, '连接中…');
+  client = mqtt.connect(v('url'), {
+    username: v('user') || undefined, password: v('pass') || undefined,
+    clientId: 'smartr-web-' + Math.random().toString(16).slice(2, 10), reconnectPeriod: 5000,
+  });
+  client.on('connect', () => {
+    setStatus(true, '已连接服务器');
+    client.subscribe([base + '/state', base + '/reply', base + '/online'], { qos: 1 });
+  });
+  client.on('reconnect', () => setStatus(false, '重新连接中…'));
+  client.on('error', e => { setStatus(false, '错误：' + e.message); });
+  client.on('message', (topic, payload) => {
+    const text = payload.toString();
+    if (topic.endsWith('/state')) { try { showState(JSON.parse(text)); } catch (e) {} }
+    else if (topic.endsWith('/reply')) log(text);
+    else if (topic.endsWith('/online')) setStatus(text === '1', text === '1' ? '设备在线' : '设备离线');
+  });
+};
+</script>
+</body>
+</html>
