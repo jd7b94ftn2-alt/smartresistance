@@ -850,9 +850,9 @@ std::uint16_t appColor(msg::App app) {
 
 // Card = rounded panel + app colour strip + the host-rendered 2-bit text bitmap.
 // Pixels are drawn as horizontal runs; background (level 0) is skipped.
-void drawMessageCard(int x, int y, const msg::Message& m) {
+void drawMessageCard(int x, int y, const msg::Message& m, std::uint16_t bg = kBg) {
     const int h = m.height + 8;
-    panel(x, y, kMsgCardW, h, 9, kCard);
+    panel(x, y, kMsgCardW, h, 9, kCard, bg);
     tft.fillSmoothRoundRect(x + 4, y + 7, 4, std::max(4, h - 14), 2, appColor(m.app), kCard);
     const std::uint16_t palette[4] = {kCard, tft.alphaBlend(85, kFg, kCard), tft.alphaBlend(170, kFg, kCard), kFg};
     const int stride = (m.width + 3) / 4;
@@ -954,6 +954,49 @@ void renderMessages() {
 
 void scrollMessages(int steps) {
     msgScroll = std::max(0, std::min(msgMaxScroll(), msgScroll + steps));
+}
+
+// ------------------------------------------------------------ new-message banner (any page)
+// A newly arrived card pops up under the status bar for kBannerMs. While it shows, the page below
+// is frozen and the first knob/touch input only dismisses it (so nothing changes by accident);
+// tapping the banner or pressing the knob opens the message list.
+constexpr std::uint32_t kBannerMs = 6000;
+constexpr int kBannerY = kBar + 4;
+constexpr int kBannerH = msg::kMaxHeight + 8;
+bool bannerShown = false;
+std::uint32_t bannerUntilMs = 0;
+std::uint32_t announcedMs = 0;        // receivedMs of the newest card already announced
+
+void clearContent();
+
+void drawBanner(const msg::Message& m) {
+    tft.fillRect(0, kBar + 1, kWidth, kBannerH + 10, kBg);
+    panel(kMsgCardX - 2, kBannerY - 2, kMsgCardW + 4, m.height + 12, 11, kAccent);
+    drawMessageCard(kMsgCardX, kBannerY, m, kAccent);
+}
+
+void hideBanner() {
+    bannerShown = false;
+    clearContent();          // repaint the page that was under the banner
+    dirty = true;
+}
+
+void checkNewMessage(std::uint32_t now) {
+    msg::Message m;
+    if (!msg::get(0, m) || m.receivedMs == announcedMs) {
+        return;
+    }
+    announcedMs = m.receivedMs;
+    if (currentPage == Page::Messages) {
+        msg::markAllRead();  // already looking at the list; it redraws by itself
+        return;
+    }
+    if (currentPage == Page::TouchCal) {
+        return;
+    }
+    bannerShown = true;
+    bannerUntilMs = now + kBannerMs;
+    drawBanner(m);
 }
 
 const int kRelayRowY[4] = {32, 66, 100, 134};
@@ -1267,6 +1310,7 @@ void enterPage(Page page) {
     }
 
     currentPage = page;
+    bannerShown = false;
     knobArmed = false;
     bridgeDrawnRev = 0xFFFFFFFF;
     tempDrawnCount = -1;
@@ -1298,6 +1342,9 @@ void renderPage() {
         return;
     }
     drawStatusBar();
+    if (bannerShown) {
+        return;              // page frozen under the banner
+    }
     switch (currentPage) {
         case Page::Menu: renderHome(); break;
         case Page::Resistor: renderResistor(); break;
@@ -1317,6 +1364,16 @@ void renderPage() {
 enum class Tap : std::uint8_t { None, Done, Repeat };
 
 Tap onTouch(int x, int y) {
+    if (bannerShown) {
+        if (y >= kBannerY && y < kBannerY + kBannerH) {
+            bannerShown = false;
+            returnPage = currentPage;
+            setPage(Page::Messages);
+        } else {
+            hideBanner();
+        }
+        return Tap::Done;
+    }
     if (currentPage != Page::Menu && y < kBar && x < 80) {
         goHome();
         return Tap::Done;
@@ -1785,17 +1842,32 @@ void loop() {
         return;
     }
 
+    checkNewMessage(now);
+    if (bannerShown && static_cast<std::int32_t>(now - bannerUntilMs) >= 0) {
+        hideBanner();
+    }
+
     pollTouch(now);
 
     const int steps = takeEncoderSteps();
     if (steps != 0) {
-        onRotate(steps);
+        if (bannerShown) {
+            hideBanner();    // first turn only dismisses the banner
+        } else {
+            onRotate(steps);
+        }
         dirty = true;
     }
 
     switch (pollButton()) {
         case Press::Short:
-            onShortPress();
+            if (bannerShown) {
+                bannerShown = false;
+                returnPage = currentPage;
+                setPage(Page::Messages);
+            } else {
+                onShortPress();
+            }
             dirty = true;
             break;
         case Press::Long:
