@@ -9,7 +9,7 @@
 // BLE, TCP, HTTP). All of it runs on the Arduino loop task.
 namespace app {
 
-constexpr const char* kFirmwareVersion = "1.1.1";
+constexpr const char* kFirmwareVersion = "1.2.0";
 
 // Relay indices for the raw/test interface: 0..35 = shift-chain bits (hardware/relay_map.csv),
 // 36..39 = spare driver outputs, 40 = K_OUT.

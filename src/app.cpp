@@ -11,6 +11,7 @@
 #include "application_controller.h"
 #include "board_pins.h"
 #include "comm.h"
+#include "messages.h"
 #include "relay_backend.h"
 #include "resistance_controller.h"
 #include "ui.h"
@@ -321,7 +322,8 @@ const char* const kHelpText =
     "WIFI <ssid> [password] | WIFI OFF | WIFI? | BAUD <n> | KNOB <0..3>\n"
     "MQTT <host> [port] [user] [password] | MQTT OFF | MQTT?\n"
     "BLE <0|1> | BLE? | BLEMODE <0=cmd|1=uart bridge> | LANG <0=zh|1=en> | TOUCHCAL | TOUCH?\n"
-    "PAGE <0..10> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
+    "MSGNEW <id> <app> <w> <h> | MSGDAT <id> <off> <b64> | MSGEND <id> | MSG? | MSGREAD | MSGCLR\n"
+    "PAGE <0..11> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
 
 String handleCalibration(String* tokens, int count) {
     Calibration& cal = controller.calibration();
@@ -696,6 +698,9 @@ String handleCommand(const String& rawLine) {
     if (cmd == "STAT?" || cmd == "R?") {
         return statusLine();
     }
+    if (cmd.startsWith("MSG")) {
+        return msg::handleCommand(cmd, tokens, count);
+    }
 
     if (cmd == "R") {
         if (count < 2 || !parseOhms(tokens[1], a) || a > smart_resistance::kMaximumResistanceOhms + 0.5) {
@@ -909,7 +914,7 @@ String handleCommand(const String& rawLine) {
 
     if (cmd == "PAGE") {
         if (count < 2 || !parseNumber(tokens[1], a) || a < 0 || a >= static_cast<int>(ui::Page::Count)) {
-            return "ERR PAGE <0..10>";
+            return "ERR PAGE <0..11>";
         }
         ui::setPage(static_cast<ui::Page>(static_cast<int>(a)));
         return "OK";

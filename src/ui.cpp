@@ -12,6 +12,7 @@
 #include "comm.h"
 #include "font_zh16.h"
 #include "font_zh24.h"
+#include "messages.h"
 
 namespace ui {
 namespace {
@@ -300,6 +301,7 @@ std::uint32_t relayOnMs = 200;
 std::uint32_t relayOffMs = 200;
 std::uint32_t relayCount = 100;
 int settingsField = 0;     // 0 backlight, 1 flip, 2 language, 3 touch calibration
+int msgScroll = 0;         // index of the top card on the Messages page
 std::uint32_t bridgeDrawnRev = 0xFFFFFFFF;
 int tempDrawnCount = -1;
 
@@ -340,7 +342,7 @@ const HomeEntry kHome[] = {
     {"旋钮", "Knob", "USB 键鼠", "USB HID", Page::Knob, rgb(0xA855F7)},
     {"串口", "UART", "J_DBG 监视", "J_DBG log", Page::Serial, rgb(0xF97316)},
     {"曲线", "Log", "板温记录", "Board temp", Page::TempLog, rgb(0x14B8A6)},
-    {"时钟", "Clock", "信息屏", "Info", Page::Info, rgb(0xEC4899)},
+    {"时钟", "Clock", "时钟/消息", "Clock/Msg", Page::Info, rgb(0xEC4899)},
     {"继电器", "Relay", "循环测试", "Cycle test", Page::RelayTest, rgb(0xEF4444)},
     {"设置", "Setup", "背光/触摸", "Light/Touch", Page::About, rgb(0x94A3B8)},
 };
@@ -373,6 +375,7 @@ const char* pageTitle(Page page) {
         case Page::Info: return tr("信息时钟", "Info");
         case Page::RelayTest: return tr("继电器测试", "Relay test");
         case Page::About: return tr("设置", "Settings");
+        case Page::Messages: return tr("消息", "Messages");
         default: return "";
     }
 }
@@ -451,12 +454,18 @@ void drawStatusBar() {
     label(kSlotTitle, home ? 8 : 72, 5, 92, pageTitle(currentPage), Font::Small, kFg, TL_DATUM, kBarColor);
 
     String right;
-    if (app::tempValid()) {
-        right += String(app::boardTempC(), 1) + "°C ";
+    std::uint16_t rightColor = kDim;
+    if (msg::unread() > 0 && currentPage != Page::Messages) {
+        right = String(tr("新消息 ", "New ")) + String(msg::unread());     // tap here to open the list
+        rightColor = kWarn;
+    } else {
+        if (app::tempValid()) {
+            right += String(app::boardTempC(), 1) + "°C ";
+        }
+        right += comm::wifiConnected() ? "WiFi " : (comm::accessPointActive() ? "AP " : "");
+        right += comm::bleConnected() ? "BT" : "";
     }
-    right += comm::wifiConnected() ? "WiFi " : (comm::accessPointActive() ? "AP " : "");
-    right += comm::bleConnected() ? "BT" : "";
-    label(kSlotStatus, 262, 5, 90, right, Font::Small, kDim, TR_DATUM, kBarColor);
+    label(kSlotStatus, 262, 5, 90, right, Font::Small, rightColor, TR_DATUM, kBarColor);
 
     const auto& st = app::state();
     button(kSlotOut, Rect{268, 4, 48, 18}, st.fault ? "ERR" : (st.outputEnabled ? "ON" : "OFF"),
@@ -817,6 +826,57 @@ void renderTempLog() {
     }
 }
 
+// ------------------------------------------------------------ message cards
+constexpr int kMsgCardX = 8;
+constexpr int kMsgCardW = 304;
+constexpr int kMsgListY = 30;
+constexpr int kMsgCardStep = 60;     // card height is bitmap height (<= 50) + 8
+constexpr int kInfoCardY = 182;
+
+void resetSlotRange(int first, int last) {
+    for (int i = first; i <= last; ++i) {
+        slotText[i] = "\x01";
+        slotKey[i] = 0xFFFFFFFF;
+    }
+}
+
+std::uint16_t appColor(msg::App app) {
+    switch (app) {
+        case msg::App::Feishu: return rgb(0x3370FF);
+        case msg::App::WeChat: return rgb(0x07C160);
+        default: return kDim;
+    }
+}
+
+// Card = rounded panel + app colour strip + the host-rendered 2-bit text bitmap.
+// Pixels are drawn as horizontal runs; background (level 0) is skipped.
+void drawMessageCard(int x, int y, const msg::Message& m) {
+    const int h = m.height + 8;
+    panel(x, y, kMsgCardW, h, 9, kCard);
+    tft.fillSmoothRoundRect(x + 4, y + 7, 4, std::max(4, h - 14), 2, appColor(m.app), kCard);
+    const std::uint16_t palette[4] = {kCard, tft.alphaBlend(85, kFg, kCard), tft.alphaBlend(170, kFg, kCard), kFg};
+    const int stride = (m.width + 3) / 4;
+    const int bx = x + 12;
+    const int by = y + 4;
+    tft.startWrite();
+    for (int row = 0; row < m.height; ++row) {
+        const std::uint8_t* line = m.pixels + row * stride;
+        int col = 0;
+        while (col < m.width) {
+            const int level = (line[col >> 2] >> (6 - 2 * (col & 3))) & 3;
+            int end = col + 1;
+            while (end < m.width && ((line[end >> 2] >> (6 - 2 * (end & 3))) & 3) == level) {
+                ++end;
+            }
+            if (level != 0) {
+                tft.drawFastHLine(bx + col, by + row, end - col, palette[level]);
+            }
+            col = end;
+        }
+    }
+    tft.endWrite();
+}
+
 void renderInfo() {
     comm::requestWeather();
     if (comm::timeValid()) {
@@ -843,9 +903,57 @@ void renderInfo() {
     }
     label(2, 30, 128, 280, board, Font::Large, kFg);
     label(3, 30, 162, 280, comm::weatherLine(), Font::Small, kWarn);
-    label(4, 30, 186, 280, "IP " + comm::ipAddress(), Font::Small, kDim);
-    label(5, 30, 208, 280, String(tr("电阻 ", "R ")) + String(app::state().targetOhms) + " Ω  "
-        + (app::state().outputEnabled ? tr("输出开", "ON") : tr("输出关", "OFF")), Font::Small, kDim);
+    // With messages stored, the newest card replaces the IP / resistance lines (tap it to open the list).
+    const bool showCard = msg::count() > 0;
+    if (changed(6, "", showCard ? msg::revision() : 0U)) {
+        tft.fillRect(0, kInfoCardY, kWidth, kHeight - kInfoCardY, kBg);
+        resetSlotRange(4, 5);
+        msg::Message m;
+        if (showCard && msg::get(0, m)) {
+            drawMessageCard(kMsgCardX, kInfoCardY, m);
+        }
+    }
+    if (!showCard) {
+        label(4, 30, 186, 280, "IP " + comm::ipAddress(), Font::Small, kDim);
+        label(5, 30, 208, 280, String(tr("电阻 ", "R ")) + String(app::state().targetOhms) + " Ω  "
+            + (app::state().outputEnabled ? tr("输出开", "ON") : tr("输出关", "OFF")), Font::Small, kDim);
+    }
+}
+
+// ------------------------------------------------------------ messages page
+constexpr int kMsgVisible = 3;
+
+int msgMaxScroll() {
+    return std::max(0, msg::count() - kMsgVisible);
+}
+
+void renderMessages() {
+    const int total = msg::count();
+    msgScroll = std::min(msgScroll, msgMaxScroll());
+    if (!changed(0, "", msg::revision() * 64U + static_cast<std::uint32_t>(msgScroll))) {
+        return;
+    }
+    tft.fillRect(0, kBar + 1, kWidth, kHeight - kBar - 1, kBg);
+    resetSlotRange(1, 2);
+    if (total == 0) {
+        label(1, kWidth / 2, 104, 300, tr("暂无消息", "No messages"), Font::Large, kDim, TC_DATUM);
+        label(2, kWidth / 2, 140, 300, tr("在电脑上位机里打开\"消息转发\"", "Turn on forwarding in the PC host"),
+            Font::Small, kDim, TC_DATUM);
+        return;
+    }
+    for (int i = 0; i < kMsgVisible; ++i) {
+        msg::Message m;
+        if (msg::get(msgScroll + i, m)) {
+            drawMessageCard(kMsgCardX, kMsgListY + i * kMsgCardStep, m);
+        }
+    }
+    const int last = std::min(total, msgScroll + kMsgVisible);
+    label(1, kWidth / 2, 216, 300, String(msgScroll + 1) + "-" + String(last) + " / " + String(total)
+        + tr("   旋钮或点上下翻页", "   turn / tap to scroll"), Font::Small, kDim, TC_DATUM);
+}
+
+void scrollMessages(int steps) {
+    msgScroll = std::max(0, std::min(msgMaxScroll(), msgScroll + steps));
 }
 
 const int kRelayRowY[4] = {32, 66, 100, 134};
@@ -1167,6 +1275,10 @@ void enterPage(Page page) {
     if (page == Page::Ntc) {
         ntcEditTemp = app::ntcTemperature();
     }
+    if (page == Page::Messages) {
+        msgScroll = 0;
+        msg::markAllRead();
+    }
     if (page == Page::Menu) {
         for (int i = 0; i < kHomeCount; ++i) {
             if (kHome[i].page == returnPage) {
@@ -1197,6 +1309,7 @@ void renderPage() {
         case Page::Info: renderInfo(); break;
         case Page::RelayTest: renderRelayTest(); break;
         case Page::About: renderAbout(); break;
+        case Page::Messages: renderMessages(); break;
         default: break;
     }
 }
@@ -1208,8 +1321,28 @@ Tap onTouch(int x, int y) {
         goHome();
         return Tap::Done;
     }
+    // "新消息 N" in the status bar opens the message list.
+    if (y < kBar && x >= 166 && x < 266 && msg::count() > 0 && currentPage != Page::Messages) {
+        returnPage = currentPage;
+        setPage(Page::Messages);
+        return Tap::Done;
+    }
     app::Settings& config = app::settings();
     switch (currentPage) {
+        case Page::Info:
+            if (y >= kInfoCardY && msg::count() > 0) {
+                setPage(Page::Messages);
+                return Tap::Done;
+            }
+            break;
+
+        case Page::Messages:
+            if (y >= kBar) {
+                scrollMessages(y < kHeight / 2 ? -1 : 1);
+                return Tap::Repeat;
+            }
+            break;
+
         case Page::Menu:
             for (int i = 0; i < kHomeCount; ++i) {
                 if (homeTile(i).contains(x, y)) {
@@ -1496,6 +1629,10 @@ void onRotate(int steps) {
             }
             break;
 
+        case Page::Messages:
+            scrollMessages(steps);
+            break;
+
         case Page::About:
             if (settingsField == 0) {
                 setBacklightSteps(steps);
@@ -1546,6 +1683,9 @@ void onShortPress() {
             break;
         case Page::About:
             settingsField = wrap(settingsField + 1, 4);
+            break;
+        case Page::Messages:
+            msgScroll = 0;      // back to the newest
             break;
         case Page::TouchCal:
             config.touchSkipped = true;

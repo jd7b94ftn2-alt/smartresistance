@@ -18,6 +18,7 @@ enum class Page : std::uint8_t {
     RelayTest,
     About,
     TouchCal,
+    Messages,
     Count,
 };
 
