@@ -31,9 +31,15 @@ struct Message {
     const std::uint8_t* pixels = nullptr;
 };
 
+// Fixed image slots for other pages (slot 0 = Desk page "now playing"), same 2-bit format:
+//   IMGNEW <slot> <w> <h> | IMGDAT <slot> <offset> <base64> | IMGEND <slot> | IMGCLR <slot>
+constexpr int kImageSlots = 2;
+
 void begin();
-// Handles every command starting with "MSG"; `cmd` is tokens[0] upper-cased.
+// Handles every command starting with "MSG" or "IMG"; `cmd` is tokens[0] upper-cased.
 String handleCommand(const String& cmd, const String* tokens, int count);
+bool image(int slot, Message& out);    // false when the slot is empty
+std::uint32_t imageRevision();
 
 int count();
 int unread();

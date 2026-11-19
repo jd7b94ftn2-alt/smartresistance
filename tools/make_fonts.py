@@ -16,7 +16,7 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SOURCES = [os.path.join(ROOT, 'src', 'ui.cpp')]
+SOURCES = [os.path.join(ROOT, 'src', 'ui.cpp'), os.path.join(ROOT, 'src', 'desk.cpp')]
 FONT_FILE = r'C:\Windows\Fonts\msyh.ttc'
 SIZES = [(16, 'font_zh16.h', 'kFontZh16'), (24, 'font_zh24.h', 'kFontZh24')]
 EXTRA = '°Ω…'

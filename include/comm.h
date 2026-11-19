@@ -54,4 +54,11 @@ const char* knobModeName(KnobMode mode);
 void knobRotate(KnobMode mode, int steps);
 void knobClick(KnobMode mode);
 
+// ---- USB HID shortcut actions (Macro / Desk pages) ----
+enum class Action : std::uint8_t {
+    Screenshot, Lock, ShowDesktop, TaskManager, Copy, Paste, Undo, SwitchWindow,
+    Mute, PlayPause, PrevTrack, NextTrack, FeishuMic, FeishuCamera, VolumeUp, VolumeDown, Count,
+};
+void sendAction(Action action);
+
 }  // namespace comm

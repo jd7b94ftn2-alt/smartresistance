@@ -19,6 +19,9 @@ enum class Page : std::uint8_t {
     About,
     TouchCal,
     Messages,
+    Desk,
+    Macro,
+    Pomodoro,
     Count,
 };
 

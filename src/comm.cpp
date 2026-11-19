@@ -844,4 +844,47 @@ void knobClick(KnobMode mode) {
     }
 }
 
+namespace {
+
+void chord(std::uint8_t m1, std::uint8_t m2, std::uint8_t key) {
+    if (m1 != 0) {
+        hidKeyboard.press(m1);
+    }
+    if (m2 != 0) {
+        hidKeyboard.press(m2);
+    }
+    hidKeyboard.press(key);
+    delay(15);
+    hidKeyboard.releaseAll();
+}
+
+void consumerKey(std::uint16_t usage) {
+    consumerControl.press(usage);
+    consumerControl.release();
+}
+
+}  // namespace
+
+void sendAction(Action action) {
+    switch (action) {
+        case Action::Screenshot: chord(KEY_LEFT_GUI, KEY_LEFT_SHIFT, 's'); break;
+        case Action::Lock: chord(KEY_LEFT_GUI, 0, 'l'); break;
+        case Action::ShowDesktop: chord(KEY_LEFT_GUI, 0, 'd'); break;
+        case Action::TaskManager: chord(KEY_LEFT_CTRL, KEY_LEFT_SHIFT, KEY_ESC); break;
+        case Action::Copy: chord(KEY_LEFT_CTRL, 0, 'c'); break;
+        case Action::Paste: chord(KEY_LEFT_CTRL, 0, 'v'); break;
+        case Action::Undo: chord(KEY_LEFT_CTRL, 0, 'z'); break;
+        case Action::SwitchWindow: chord(KEY_LEFT_ALT, 0, KEY_TAB); break;
+        case Action::Mute: consumerKey(CONSUMER_CONTROL_MUTE); break;
+        case Action::PlayPause: consumerKey(CONSUMER_CONTROL_PLAY_PAUSE); break;
+        case Action::PrevTrack: consumerKey(CONSUMER_CONTROL_SCAN_PREVIOUS); break;
+        case Action::NextTrack: consumerKey(CONSUMER_CONTROL_SCAN_NEXT); break;
+        case Action::FeishuMic: chord(KEY_LEFT_CTRL, KEY_LEFT_SHIFT, 'd'); break;     // Feishu meeting: mic on/off
+        case Action::FeishuCamera: chord(KEY_LEFT_CTRL, KEY_LEFT_SHIFT, 'v'); break;  // Feishu meeting: camera
+        case Action::VolumeUp: consumerKey(CONSUMER_CONTROL_VOLUME_INCREMENT); break;
+        case Action::VolumeDown: consumerKey(CONSUMER_CONTROL_VOLUME_DECREMENT); break;
+        default: break;
+    }
+}
+
 }  // namespace comm

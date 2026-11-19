@@ -10,6 +10,7 @@
 #include "app.h"
 #include "board_pins.h"
 #include "comm.h"
+#include "desk.h"
 #include "font_zh16.h"
 #include "font_zh24.h"
 #include "messages.h"
@@ -127,6 +128,7 @@ struct Rect {
 };
 
 enum class Style : std::uint8_t { Normal, Selected, On, Off, Accent, Disabled, Muted };
+enum class Tap : std::uint8_t { None, Done, Repeat };     // result of a touch handler
 
 // Anti-aliased rounded panel. The background colour is always passed so TFT_eSPI never has to read
 // pixels back from the display.
@@ -302,6 +304,19 @@ std::uint32_t relayOffMs = 200;
 std::uint32_t relayCount = 100;
 int settingsField = 0;     // 0 backlight, 1 flip, 2 language, 3 touch calibration
 int msgScroll = 0;         // index of the top card on the Messages page
+int pomoMinutes = 25;      // pomodoro timer (keeps running on every page)
+bool pomoRunning = false;
+bool pomoPaused = false;
+bool pomoDone = false;
+std::uint32_t pomoEndMs = 0;
+std::uint32_t pomoLeftMs = 0;         // remaining time while paused
+int timerMode = 0;                    // timer page: 0 countdown, 1 stopwatch
+bool swRunning = false;
+std::uint32_t swStartMs = 0;
+std::uint32_t swAccumMs = 0;
+std::uint32_t pomoRemaining(std::uint32_t now);
+std::uint32_t stopwatchMs(std::uint32_t now);
+String mmss(std::uint32_t ms);
 std::uint32_t bridgeDrawnRev = 0xFFFFFFFF;
 int tempDrawnCount = -1;
 
@@ -329,22 +344,25 @@ float calRawY[4];
 struct HomeEntry {
     const char* zh;
     const char* en;
-    const char* zhSub;
-    const char* enSub;
     Page page;
     std::uint16_t color;
+    std::uint8_t icon;         // homeIcon() index
 };
 
+// 4 x 3 grid: instrument row, desk-assistant row, connectivity row.
 const HomeEntry kHome[] = {
-    {"电阻", "Ohm", "0~999kΩ", "0~999kΩ", Page::Resistor, rgb(0x2A9DF4)},
-    {"NTC", "NTC", "温度模拟", "Temp sim", Page::Ntc, rgb(0x22C55E)},
-    {"蓝牙", "BLE", "连接/透传", "Link/UART", Page::Bluetooth, rgb(0x6366F1)},
-    {"旋钮", "Knob", "USB 键鼠", "USB HID", Page::Knob, rgb(0xA855F7)},
-    {"串口", "UART", "J_DBG 监视", "J_DBG log", Page::Serial, rgb(0xF97316)},
-    {"曲线", "Log", "板温记录", "Board temp", Page::TempLog, rgb(0x14B8A6)},
-    {"时钟", "Clock", "时钟/消息", "Clock/Msg", Page::Info, rgb(0xEC4899)},
-    {"继电器", "Relay", "循环测试", "Cycle test", Page::RelayTest, rgb(0xEF4444)},
-    {"设置", "Setup", "背光/触摸", "Light/Touch", Page::About, rgb(0x94A3B8)},
+    {"电阻", "Ohm", Page::Resistor, rgb(0x2A9DF4), 0},
+    {"NTC", "NTC", Page::Ntc, rgb(0x22C55E), 1},
+    {"继电器", "Relay", Page::RelayTest, rgb(0xEF4444), 7},
+    {"曲线", "Log", Page::TempLog, rgb(0x14B8A6), 5},
+    {"桌面", "Desk", Page::Desk, rgb(0x0EA5E9), 9},
+    {"快捷键", "Keys", Page::Macro, rgb(0xF59E0B), 10},
+    {"计时", "Timer", Page::Pomodoro, rgb(0xE11D48), 11},
+    {"时钟", "Clock", Page::Info, rgb(0xEC4899), 6},
+    {"蓝牙", "BLE", Page::Bluetooth, rgb(0x6366F1), 2},
+    {"旋钮", "Knob", Page::Knob, rgb(0xA855F7), 3},
+    {"串口", "UART", Page::Serial, rgb(0xF97316), 4},
+    {"设置", "Setup", Page::About, rgb(0x64748B), 8},
 };
 constexpr int kHomeCount = sizeof(kHome) / sizeof(kHome[0]);
 
@@ -376,6 +394,9 @@ const char* pageTitle(Page page) {
         case Page::RelayTest: return tr("继电器测试", "Relay test");
         case Page::About: return tr("设置", "Settings");
         case Page::Messages: return tr("消息", "Messages");
+        case Page::Desk: return tr("桌面", "Desk");
+        case Page::Macro: return tr("快捷键", "Shortcuts");
+        case Page::Pomodoro: return tr("计时", "Timer");
         default: return "";
     }
 }
@@ -458,6 +479,12 @@ void drawStatusBar() {
     if (msg::unread() > 0 && currentPage != Page::Messages) {
         right = String(tr("新消息 ", "New ")) + String(msg::unread());     // tap here to open the list
         rightColor = kWarn;
+    } else if (pomoRunning && currentPage != Page::Pomodoro) {
+        right = String(tr("倒计时 ", "Timer ")) + mmss(pomoRemaining(millis()));
+        rightColor = rgb(0xFB7185);
+    } else if (swRunning && currentPage != Page::Pomodoro) {
+        right = String(tr("秒表 ", "Watch ")) + mmss(stopwatchMs(millis()));
+        rightColor = rgb(0xFB7185);
     } else {
         if (app::tempValid()) {
             right += String(app::boardTempC(), 1) + "°C ";
@@ -480,7 +507,7 @@ int digitX(int i) {
 const Rect kOutputButton = {10, 196, 300, 38};
 
 Rect homeTile(int i) {
-    return Rect{static_cast<std::int16_t>(4 + (i % 3) * 106), static_cast<std::int16_t>(30 + (i / 3) * 70), 102, 66};
+    return Rect{static_cast<std::int16_t>(4 + (i % 4) * 79), static_cast<std::int16_t>(30 + (i / 4) * 70), 75, 66};
 }
 
 // Small line icons for the home tiles, drawn around (cx, cy) in about 18 x 18 px.
@@ -532,13 +559,36 @@ void homeIcon(int index, int cx, int cy, std::uint16_t c, std::uint16_t bg) {
             thickLine(cx, cy + 6, cx + 7, cy - 4, c, bg);
             tft.fillSmoothCircle(cx + 7, cy + 6, 2, c, bg);
             break;
-        default:  // gear
+        case 8:   // gear
             for (int k = 0; k < 8; ++k) {
                 const float a = k * 0.785398f;
                 thickLine(cx + 6 * cosf(a), cy + 6 * sinf(a), cx + 9 * cosf(a), cy + 9 * sinf(a), c, bg, 3.0f);
             }
             tft.drawSmoothCircle(cx, cy, 6, c, bg);
             tft.drawSmoothCircle(cx, cy, 5, c, bg);
+            break;
+        case 9:   // monitor
+            tft.drawRoundRect(cx - 9, cy - 8, 19, 13, 2, c);
+            tft.drawRoundRect(cx - 8, cy - 7, 17, 11, 2, c);
+            thickLine(cx, cy + 5, cx, cy + 8, c, bg);
+            thickLine(cx - 5, cy + 9, cx + 5, cy + 9, c, bg);
+            break;
+        case 10:  // keys
+            for (int k = 0; k < 4; ++k) {
+                const int kx = cx - 9 + (k % 2) * 10;
+                const int ky = cy - 9 + (k / 2) * 10;
+                tft.drawRoundRect(kx, ky, 8, 8, 2, c);
+                tft.drawRoundRect(kx + 1, ky + 1, 6, 6, 1, c);
+            }
+            break;
+        case 11:  // timer
+            tft.drawSmoothCircle(cx, cy + 2, 8, c, bg);
+            tft.drawSmoothCircle(cx, cy + 2, 7, c, bg);
+            thickLine(cx, cy + 2, cx, cy - 3, c, bg);
+            thickLine(cx, cy + 2, cx + 3, cy + 4, c, bg);
+            thickLine(cx - 3, cy - 9, cx + 3, cy - 9, c, bg);
+            break;
+        default:
             break;
     }
 }
@@ -553,23 +603,17 @@ void renderHome() {
         }
         tft.fillRect(r.x, r.y, r.w, r.h, kBg);
         if (selected) {
-            panel(r.x, r.y, r.w, r.h, 9, kAccent);
-            panel(r.x + 2, r.y + 2, r.w - 4, r.h - 4, 7, kCard, kAccent);
+            panel(r.x, r.y, r.w, r.h, 10, kAccent);
+            panel(r.x + 2, r.y + 2, r.w - 4, r.h - 4, 8, kCard, kAccent);
         } else {
-            panel(r.x, r.y, r.w, r.h, 9, kCard);
+            panel(r.x, r.y, r.w, r.h, 10, kCard);
         }
-        tft.fillSmoothRoundRect(r.x + 3, r.y + 12, 4, r.h - 24, 2, e.color, kCard);     // colour strip
-        text(tr(e.zh, e.en), r.x + 12, r.y + 23, Font::Large, kFg, kCard, 0, ML_DATUM, 2);
-        const int titleWidth = tft.textWidth(tr(e.zh, e.en));
-        text(tr(e.zhSub, e.enSub), r.x + 12, r.y + 49, Font::Small, kDim, kCard, 0, ML_DATUM, 2);
-        const int subWidth = tft.textWidth(tr(e.zhSub, e.enSub));
-        // The icon sits top-right; long titles ("继电器") push it to the subtitle row, or drop it.
-        const int iconLeft = r.w - 13 - 10;
-        if (12 + titleWidth + 3 <= iconLeft) {
-            homeIcon(i, r.x + r.w - 13, r.y + 18, e.color, kCard);
-        } else if (12 + subWidth + 3 <= iconLeft) {
-            homeIcon(i, r.x + r.w - 13, r.y + 48, e.color, kCard);
-        }
+        // Phone-style tile: white line icon on a coloured disc, name underneath.
+        const int cx = r.x + r.w / 2;
+        const int cy = r.y + 24;
+        tft.fillSmoothCircle(cx, cy, 16, e.color, kCard);
+        homeIcon(e.icon, cx, cy, kWhite, e.color);
+        text(tr(e.zh, e.en), cx, r.y + 53, Font::Small, kFg, kCard, 0, MC_DATUM, 2);
     }
 }
 
@@ -848,16 +892,22 @@ std::uint16_t appColor(msg::App app) {
     }
 }
 
+void drawBitmap2bpp(int bx, int by, const msg::Message& m, std::uint16_t bg);
+
 // Card = rounded panel + app colour strip + the host-rendered 2-bit text bitmap.
 // Pixels are drawn as horizontal runs; background (level 0) is skipped.
-void drawMessageCard(int x, int y, const msg::Message& m, std::uint16_t bg = kBg) {
+void drawMessageCard(int x, int y, const msg::Message& m, std::uint16_t bg = kBg, std::int32_t strip = -1) {
     const int h = m.height + 8;
     panel(x, y, kMsgCardW, h, 9, kCard, bg);
-    tft.fillSmoothRoundRect(x + 4, y + 7, 4, std::max(4, h - 14), 2, appColor(m.app), kCard);
-    const std::uint16_t palette[4] = {kCard, tft.alphaBlend(85, kFg, kCard), tft.alphaBlend(170, kFg, kCard), kFg};
+    tft.fillSmoothRoundRect(x + 4, y + 7, 4, std::max(4, h - 14), 2,
+        strip >= 0 ? static_cast<std::uint16_t>(strip) : appColor(m.app), kCard);
+    drawBitmap2bpp(x + 12, y + 4, m, kCard);
+}
+
+// Host-rendered 2-bit text bitmap on background `bg`; level 0 pixels are skipped.
+void drawBitmap2bpp(int bx, int by, const msg::Message& m, std::uint16_t bg) {
+    const std::uint16_t palette[4] = {bg, tft.alphaBlend(85, kFg, bg), tft.alphaBlend(170, kFg, bg), kFg};
     const int stride = (m.width + 3) / 4;
-    const int bx = x + 12;
-    const int by = y + 4;
     tft.startWrite();
     for (int row = 0; row < m.height; ++row) {
         const std::uint8_t* line = m.pixels + row * stride;
@@ -877,8 +927,57 @@ void drawMessageCard(int x, int y, const msg::Message& m, std::uint16_t bg = kBg
     tft.endWrite();
 }
 
+// ~36 px weather symbol for a WMO code around (cx, cy).
+void weatherIcon(int code, int cx, int cy, std::uint16_t bg) {
+    const std::uint16_t sun = rgb(0xFBBF24);
+    const std::uint16_t cloudColor = rgb(0xCBD5E1);
+    const std::uint16_t rain = rgb(0x60A5FA);
+    auto cloud = [&](int x, int y, std::uint16_t c) {
+        tft.fillSmoothCircle(x - 8, y + 3, 7, c, bg);
+        tft.fillSmoothCircle(x + 1, y - 3, 9, c, bg);
+        tft.fillSmoothCircle(x + 10, y + 3, 7, c, bg);
+        tft.fillRect(x - 8, y + 3, 18, 7, c);
+    };
+    auto rays = [&](int x, int y, int r0, int r1) {
+        for (int k = 0; k < 8; ++k) {
+            const float a = k * 0.785398f;
+            thickLine(x + r0 * cosf(a), y + r0 * sinf(a), x + r1 * cosf(a), y + r1 * sinf(a), sun, bg);
+        }
+    };
+    if (code == 0) {
+        tft.fillSmoothCircle(cx, cy, 9, sun, bg);
+        rays(cx, cy, 12, 16);
+    } else if (code == 1 || code == 2) {
+        tft.fillSmoothCircle(cx - 6, cy - 6, 7, sun, bg);
+        rays(cx - 6, cy - 6, 10, 13);
+        cloud(cx + 3, cy + 4, cloudColor);
+    } else if (code == 45 || code == 48) {
+        for (int k = 0; k < 3; ++k) {
+            thickLine(cx - 14 + k * 3, cy - 8 + k * 8, cx + 14 - k * 3, cy - 8 + k * 8, cloudColor, bg, 3.0f);
+        }
+    } else {
+        cloud(cx, cy - 4, code == 3 ? cloudColor : rgb(0x94A3B8));
+        if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) {
+            for (int k = 0; k < 3; ++k) {
+                thickLine(cx - 8 + k * 8, cy + 10, cx - 11 + k * 8, cy + 17, rain, bg);
+            }
+        } else if ((code >= 71 && code <= 77) || code == 85 || code == 86) {
+            for (int k = 0; k < 3; ++k) {
+                tft.fillSmoothCircle(cx - 8 + k * 8, cy + 14, 2, kWhite, bg);
+            }
+        } else if (code >= 95) {
+            tft.fillTriangle(cx + 1, cy + 6, cx - 5, cy + 14, cx + 1, cy + 14, sun);
+            tft.fillTriangle(cx - 1, cy + 13, cx + 5, cy + 13, cx - 2, cy + 20, sun);
+        }
+    }
+}
+
+constexpr int kWeatherY = 114;
+
 void renderInfo() {
     comm::requestWeather();
+    static const char* const zhWeek[] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
+    static const char* const enWeek[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
     if (comm::timeValid()) {
         const time_t now = time(nullptr);
         struct tm local;
@@ -887,22 +986,47 @@ void renderInfo() {
         char date[16];
         strftime(clock, sizeof(clock), "%H:%M:%S", &local);
         strftime(date, sizeof(date), "%Y-%m-%d", &local);
-        static const char* const zhWeek[] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
-        static const char* const enWeek[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-        bigNumber(0, 30, 36, 270, clock, kFg, TL_DATUM);
-        label(1, 30, 94, 280, String(date) + "  " + tr(zhWeek[local.tm_wday], enWeek[local.tm_wday]), Font::Large, kInfo);
+        bigNumber(0, kWidth / 2, 32, 300, clock, kFg, TC_DATUM);
+        label(1, kWidth / 2, 84, 300, String(date) + "  " + tr(zhWeek[local.tm_wday], enWeek[local.tm_wday]), Font::Large,
+            kInfo, TC_DATUM);
     } else {
-        bigNumber(0, 30, 36, 270, "--:--:--", kDim, TL_DATUM);
-        label(1, 30, 98, 280, comm::wifiConnected() ? tr("等待网络对时", "Waiting for NTP")
-                                                    : tr("未连路由器：用 WIFI 指令配置", "No Wi-Fi: use the WIFI command"),
-            Font::Small, kDim);
+        bigNumber(0, kWidth / 2, 32, 300, "--:--:--", kDim, TC_DATUM);
+        label(1, kWidth / 2, 88, 300, tr("等待对时：打开上位机「桌面助手」或连 Wi-Fi", "Waiting for time (PC host or Wi-Fi)"),
+            Font::Small, kDim, TC_DATUM);
+    }
+
+    // Weather card: data from the PC host (WX + IMG slot 1); falls back to the board's own wttr.in line.
+    const desk::Weather w = desk::weather();
+    msg::Message detail;
+    const bool hasDetail = w.valid && msg::image(1, detail);
+    String sig = String("x") + comm::weatherLine();
+    if (w.valid) {
+        sig = String(w.code) + "," + String(w.temp, 1) + "," + String(w.low) + "," + String(w.high) + "," + String(w.humidity);
+    }
+    if (changed(2, sig, hasDetail ? msg::imageRevision() : 0U)) {
+        tft.fillRect(0, kWeatherY, kWidth, 62, kBg);
+        panel(kMsgCardX, kWeatherY, kMsgCardW, 60, 10, kCard);
+        if (w.valid) {
+            weatherIcon(w.code, 42, kWeatherY + 30, kCard);
+            text(String(desk::weatherText(w.code)) + "  " + String(w.temp, 1) + "°C", 78, kWeatherY + 18, Font::Large, kFg,
+                kCard, 0, ML_DATUM, 2);
+            if (hasDetail) {
+                drawBitmap2bpp(78, kWeatherY + 34, detail, kCard);
+            } else {
+                text(String(w.low) + "~" + String(w.high) + "°C  " + tr("湿度 ", "RH ") + String(w.humidity) + "%", 78,
+                    kWeatherY + 44, Font::Small, kDim, kCard, 0, ML_DATUM, 2);
+            }
+        } else if (comm::weatherLine().length() > 0) {
+            text(comm::weatherLine(), kWidth / 2, kWeatherY + 30, Font::Small, kWarn, kCard, 0, MC_DATUM, 2);
+        } else {
+            text(tr("天气：在上位机「桌面助手」里填城市", "Weather: set a city in the PC host"), kWidth / 2, kWeatherY + 30,
+                Font::Small, kDim, kCard, 0, MC_DATUM, 2);
+        }
     }
     String board = String(tr("板温 ", "Board ")) + "-";
     if (app::tempValid()) {
         board = String(tr("板温 ", "Board ")) + String(app::boardTempC(), 2) + "°C";
     }
-    label(2, 30, 128, 280, board, Font::Large, kFg);
-    label(3, 30, 162, 280, comm::weatherLine(), Font::Small, kWarn);
     // With messages stored, the newest card replaces the IP / resistance lines (tap it to open the list).
     const bool showCard = msg::count() > 0;
     if (changed(6, "", showCard ? msg::revision() : 0U)) {
@@ -914,7 +1038,7 @@ void renderInfo() {
         }
     }
     if (!showCard) {
-        label(4, 30, 186, 280, "IP " + comm::ipAddress(), Font::Small, kDim);
+        label(4, 30, 186, 280, board + "    IP " + comm::ipAddress(), Font::Small, kDim);
         label(5, 30, 208, 280, String(tr("电阻 ", "R ")) + String(app::state().targetOhms) + " Ω  "
             + (app::state().outputEnabled ? tr("输出开", "ON") : tr("输出关", "OFF")), Font::Small, kDim);
     }
@@ -964,6 +1088,7 @@ constexpr std::uint32_t kBannerMs = 6000;
 constexpr int kBannerY = kBar + 4;
 constexpr int kBannerH = msg::kMaxHeight + 8;
 bool bannerShown = false;
+bool bannerIsTimer = false;           // false: message card, true: "pomodoro done" text
 std::uint32_t bannerUntilMs = 0;
 std::uint32_t announcedMs = 0;        // receivedMs of the newest card already announced
 
@@ -973,6 +1098,16 @@ void drawBanner(const msg::Message& m) {
     tft.fillRect(0, kBar + 1, kWidth, kBannerH + 10, kBg);
     panel(kMsgCardX - 2, kBannerY - 2, kMsgCardW + 4, m.height + 12, 11, kAccent);
     drawMessageCard(kMsgCardX, kBannerY, m, kAccent);
+    bannerIsTimer = false;
+}
+
+void drawTextBanner(const char* title, const char* subtitle, std::uint16_t ring) {
+    tft.fillRect(0, kBar + 1, kWidth, kBannerH + 10, kBg);
+    panel(kMsgCardX - 2, kBannerY - 2, kMsgCardW + 4, kBannerH + 4, 11, ring);
+    panel(kMsgCardX, kBannerY, kMsgCardW, kBannerH, 9, kCard, ring);
+    text(title, kMsgCardX + 16, kBannerY + 18, Font::Large, kFg, kCard, 0, ML_DATUM, 2);
+    text(subtitle, kMsgCardX + 16, kBannerY + 43, Font::Small, kDim, kCard, 0, ML_DATUM, 2);
+    bannerIsTimer = true;
 }
 
 void hideBanner() {
@@ -997,6 +1132,299 @@ void checkNewMessage(std::uint32_t now) {
     bannerShown = true;
     bannerUntilMs = now + kBannerMs;
     drawBanner(m);
+}
+
+// ------------------------------------------------------------ desk page
+const Rect kDeskPrev = {8, 206, 96, 28};
+const Rect kDeskPlay = {112, 206, 96, 28};
+const Rect kDeskNext = {216, 206, 96, 28};
+constexpr int kDeskCardY = 156;
+
+String rateText(std::uint32_t bytesPerSecond) {
+    if (bytesPerSecond >= 1024UL * 1024UL) {
+        return String(bytesPerSecond / 1048576.0f, 1) + " MB/s";
+    }
+    return String(bytesPerSecond / 1024.0f, 1) + " KB/s";
+}
+
+std::uint16_t loadColor(int percent) {
+    return percent >= 85 ? kBad : (percent >= 60 ? kWarn : kGood);
+}
+
+void bar(int id, int x, int y, int w, int h, int percent, std::uint16_t color) {
+    if (!changed(id, "", static_cast<std::uint32_t>(percent) | (static_cast<std::uint32_t>(color) << 8))) {
+        return;
+    }
+    tft.fillRect(x, y, w, h, kBg);
+    panel(x, y, w, h, h / 2, kButton);
+    if (percent > 0) {
+        panel(x, y, std::max(h, w * std::min(percent, 100) / 100), h, h / 2, color);
+    }
+}
+
+void renderDesk() {
+    static const char* const zhWeek[] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
+    static const char* const enWeek[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    if (comm::timeValid()) {
+        const time_t now = time(nullptr);
+        struct tm local;
+        localtime_r(&now, &local);
+        char clock[8];
+        char date[8];
+        strftime(clock, sizeof(clock), "%H:%M", &local);
+        strftime(date, sizeof(date), "%m-%d", &local);
+        bigNumber(0, 12, 32, 176, clock, kFg, TL_DATUM);
+        label(1, 196, 36, 116, String(date) + " " + tr(zhWeek[local.tm_wday], enWeek[local.tm_wday]), Font::Small, kInfo);
+    } else {
+        bigNumber(0, 12, 32, 176, "--:--", kDim, TL_DATUM);
+        label(1, 196, 36, 116, tr("等待对时", "No time"), Font::Small, kDim);
+    }
+    const int ci = desk::ciState();
+    const char* ciText = ci == 1 ? tr("编译中", "Building") : ci == 2 ? tr("编译成功", "Build OK")
+        : ci == 3 ? tr("编译失败", "Build failed") : "";
+    String ciLine;
+    if (ci) {
+        ciLine = String(ciText) + " " + desk::ciTime();
+    }
+    label(2, 196, 58, 116, ciLine, Font::Small, ci == 2 ? kGood : (ci == 3 ? kBad : kWarn));
+
+    const desk::Sys s = desk::sys();
+    label(3, 12, 86, 40, "CPU", Font::Small, kDim);
+    label(6, 12, 108, 40, tr("内存", "RAM"), Font::Small, kDim);
+    if (s.valid) {
+        bar(4, 56, 91, 200, 10, s.cpu, loadColor(s.cpu));
+        label(5, 308, 86, 48, String(s.cpu) + "%", Font::Small, kFg, TR_DATUM);
+        bar(7, 56, 113, 200, 10, s.ram, loadColor(s.ram));
+        label(8, 308, 108, 48, String(s.ram) + "%", Font::Small, kFg, TR_DATUM);
+        label(9, 12, 130, 296, String(tr("网络  ↓ ", "Net  ↓ ")) + rateText(s.down) + "   ↑ " + rateText(s.up),
+            Font::Small, kDim);
+    } else {
+        bar(4, 56, 91, 200, 10, 0, kButton);
+        label(5, 308, 86, 48, "--", Font::Small, kDim, TR_DATUM);
+        bar(7, 56, 113, 200, 10, 0, kButton);
+        label(8, 308, 108, 48, "--", Font::Small, kDim, TR_DATUM);
+        label(9, 12, 130, 296, tr("在上位机「桌面助手」里开始推送", "Start pushing in the PC host"), Font::Small, kDim);
+    }
+
+    msg::Message m;
+    const bool hasMedia = msg::image(0, m);
+    if (changed(10, "", hasMedia ? msg::imageRevision() * 2U + (desk::playing() ? 1U : 0U) : 0U)) {
+        tft.fillRect(0, kDeskCardY, kWidth, 46, kBg);
+        resetSlotRange(11, 11);
+        if (hasMedia) {
+            drawMessageCard(kMsgCardX, kDeskCardY, m, kBg, desk::playing() ? kGood : kDim);
+        } else {
+            panel(kMsgCardX, kDeskCardY, kMsgCardW, 44, 9, kCard);
+            text(tr("没有正在播放的音乐", "Nothing playing"), kWidth / 2, kDeskCardY + 22, Font::Small, kDim, kCard, 0,
+                MC_DATUM, 2);
+        }
+    }
+    button(20, kDeskPrev, tr("上一首", "Prev"), Style::Normal, Font::Small, false);
+    button(21, kDeskPlay, desk::playing() ? tr("暂停", "Pause") : tr("播放", "Play"), Style::Accent, Font::Small, false);
+    button(22, kDeskNext, tr("下一首", "Next"), Style::Normal, Font::Small, false);
+}
+
+// ------------------------------------------------------------ macro page
+int macroField = 0;
+int macroFlash = -1;                  // button drawn highlighted for a moment after it fires
+std::uint32_t macroFlashUntil = 0;
+
+Rect macroButton(int i) {
+    return Rect{static_cast<std::int16_t>(8 + (i % 2) * 156), static_cast<std::int16_t>(32 + (i / 2) * 60), 148, 54};
+}
+
+void fireMacro(int i) {
+    macroField = i;
+    comm::sendAction(desk::macro(i));
+    macroFlash = i;
+    macroFlashUntil = millis() + 250;
+}
+
+void renderMacro() {
+    if (macroFlash >= 0 && static_cast<std::int32_t>(millis() - macroFlashUntil) >= 0) {
+        macroFlash = -1;
+    }
+    for (int i = 0; i < desk::kMacroCount; ++i) {
+        const char* name = desk::actionLabel(desk::macro(i));
+        button(i, macroButton(i), name, macroFlash == i ? Style::Selected : Style::Normal,
+            strlen(name) > 12 ? Font::Small : Font::Large, macroField == i);
+    }
+    label(10, kWidth / 2, 218, 310, tr("转旋钮选择，按下执行；按钮内容在上位机里改", "Turn to pick, press to send"),
+        Font::Small, kDim, TC_DATUM);
+}
+
+// ------------------------------------------------------------ timer page: countdown / stopwatch
+// Both keep running on every page; the status bar shows them and the countdown announces its end.
+const Rect kTimerModeCd = {8, 32, 148, 28};
+const Rect kTimerModeSw = {164, 32, 148, 28};
+const Rect kTimerPreset[4] = {{8, 162, 72, 26}, {84, 162, 72, 26}, {160, 162, 72, 26}, {236, 162, 76, 26}};
+const int kTimerPresetMin[4] = {1, 5, 10, 25};
+const Rect kTimerStart = {8, 196, 148, 38};
+const Rect kTimerReset = {164, 196, 148, 38};
+constexpr std::uint16_t kTimerColor = rgb(0xE11D48);
+
+std::uint32_t pomoRemaining(std::uint32_t now) {
+    if (pomoRunning) {
+        return static_cast<std::int32_t>(pomoEndMs - now) > 0 ? pomoEndMs - now : 0;
+    }
+    return pomoPaused ? pomoLeftMs : static_cast<std::uint32_t>(pomoMinutes) * 60000UL;
+}
+
+std::uint32_t stopwatchMs(std::uint32_t now) {
+    return swAccumMs + (swRunning ? now - swStartMs : 0);
+}
+
+// "mm:ss", or "h:mm:ss" from one hour up; countdowns round up so they reach 00:00 at the end.
+String mmss(std::uint32_t ms) {
+    const std::uint32_t s = (ms + 999) / 1000;
+    char buf[12];
+    if (s >= 3600) {
+        snprintf(buf, sizeof(buf), "%lu:%02lu:%02lu", static_cast<unsigned long>(s / 3600),
+            static_cast<unsigned long>(s / 60 % 60), static_cast<unsigned long>(s % 60));
+    } else {
+        snprintf(buf, sizeof(buf), "%02lu:%02lu", static_cast<unsigned long>(s / 60), static_cast<unsigned long>(s % 60));
+    }
+    return buf;
+}
+
+// Stopwatch: "mm:ss.d", or "h:mm:ss" from one hour up.
+String stopwatchText(std::uint32_t ms) {
+    char buf[14];
+    const std::uint32_t s = ms / 1000;
+    if (s >= 3600) {
+        snprintf(buf, sizeof(buf), "%lu:%02lu:%02lu", static_cast<unsigned long>(s / 3600),
+            static_cast<unsigned long>(s / 60 % 60), static_cast<unsigned long>(s % 60));
+    } else {
+        snprintf(buf, sizeof(buf), "%02lu:%02lu.%lu", static_cast<unsigned long>(s / 60), static_cast<unsigned long>(s % 60),
+            static_cast<unsigned long>(ms / 100 % 10));
+    }
+    return buf;
+}
+
+void pomoStartPause() {
+    const std::uint32_t now = millis();
+    if (timerMode == 1) {
+        if (swRunning) {
+            swAccumMs += now - swStartMs;
+        } else {
+            swStartMs = now;
+        }
+        swRunning = !swRunning;
+        return;
+    }
+    pomoDone = false;
+    if (pomoRunning) {
+        pomoLeftMs = pomoRemaining(now);
+        pomoRunning = false;
+        pomoPaused = true;
+    } else {
+        pomoEndMs = now + (pomoPaused ? pomoLeftMs : static_cast<std::uint32_t>(pomoMinutes) * 60000UL);
+        pomoRunning = true;
+        pomoPaused = false;
+    }
+}
+
+void pomoReset() {
+    if (timerMode == 1) {
+        swRunning = false;
+        swAccumMs = 0;
+        return;
+    }
+    pomoRunning = false;
+    pomoPaused = false;
+    pomoDone = false;
+}
+
+void renderPomodoro() {
+    const std::uint32_t now = millis();
+    const bool countdown = timerMode == 0;
+    button(0, kTimerModeCd, tr("倒计时", "Countdown"), countdown ? Style::Selected : Style::Normal, Font::Small, false);
+    button(1, kTimerModeSw, tr("秒表", "Stopwatch"), countdown ? Style::Normal : Style::Selected, Font::Small, false);
+    const bool idle = countdown ? (!pomoRunning && !pomoPaused) : (!swRunning && swAccumMs == 0);
+    const bool running = countdown ? pomoRunning : swRunning;
+
+    if (countdown) {
+        const std::uint32_t left = pomoRemaining(now);
+        bigNumber(2, kWidth / 2, 70, 300, mmss(left), running ? kFg : kInfo, TC_DATUM);
+        const std::uint32_t total = static_cast<std::uint32_t>(pomoMinutes) * 60000UL;
+        const int percent = !idle && total > 0 ? static_cast<int>(100 - left * 100 / total) : (pomoDone ? 100 : 0);
+        bar(3, 20, 126, 280, 8, percent, pomoDone ? kGood : kTimerColor);
+        String line;
+        if (pomoDone) {
+            line = tr("时间到！", "Time is up!");
+        } else if (idle) {
+            line = String(tr("时长 ", "Length ")) + String(pomoMinutes) + tr(" 分钟 · 转旋钮调整", " min - turn to change");
+        } else {
+            line = running ? tr("倒计时中", "Counting down") : tr("已暂停", "Paused");
+        }
+        label(4, kWidth / 2, 140, 300, line, Font::Small, pomoDone ? kGood : (running ? kWarn : kDim), TC_DATUM);
+        for (int i = 0; i < 4; ++i) {
+            String name = tr("番茄 25", "Pomo 25");
+            if (i < 3) {
+                name = String(kTimerPresetMin[i]) + tr(" 分", " min");
+            }
+            button(5 + i, kTimerPreset[i], name, idle && pomoMinutes == kTimerPresetMin[i] ? Style::Selected
+                : (idle ? Style::Normal : Style::Disabled), Font::Small, false);
+        }
+    } else {
+        bigNumber(2, kWidth / 2, 70, 300, stopwatchText(stopwatchMs(now)), running ? kFg : kInfo, TC_DATUM);
+        if (changed(3, "", 0xFFFF0000U)) {
+            tft.fillRect(20, 126, 280, 8, kBg);       // no progress bar for the stopwatch
+        }
+        label(4, kWidth / 2, 140, 300, running ? tr("计时中", "Running") : (idle ? tr("按开始计时", "Press start")
+            : tr("已暂停", "Paused")), Font::Small, running ? kWarn : kDim, TC_DATUM);
+        for (int i = 0; i < 4; ++i) {
+            if (changed(5 + i, "", 1)) {
+                tft.fillRect(kTimerPreset[i].x, kTimerPreset[i].y, kTimerPreset[i].w, kTimerPreset[i].h, kBg);
+            }
+        }
+    }
+    button(9, kTimerStart, running ? tr("暂停", "Pause") : (idle ? tr("开始", "Start") : tr("继续", "Resume")),
+        running ? Style::Normal : Style::On, Font::Large, false);
+    button(10, kTimerReset, tr("重置", "Reset"), Style::Normal, Font::Large, false);
+}
+
+Tap timerTouch(int x, int y) {
+    if (kTimerModeCd.contains(x, y) || kTimerModeSw.contains(x, y)) {
+        timerMode = kTimerModeSw.contains(x, y) ? 1 : 0;
+        resetSlotRange(2, 8);
+        tft.fillRect(0, 66, kWidth, 124, kBg);
+        return Tap::Done;
+    }
+    if (timerMode == 0 && !pomoRunning && !pomoPaused) {
+        for (int i = 0; i < 4; ++i) {
+            if (kTimerPreset[i].contains(x, y)) {
+                pomoMinutes = kTimerPresetMin[i];
+                pomoDone = false;
+                return Tap::Done;
+            }
+        }
+    }
+    if (kTimerStart.contains(x, y)) {
+        pomoStartPause();
+        return Tap::Done;
+    }
+    if (kTimerReset.contains(x, y)) {
+        pomoReset();
+        return Tap::Done;
+    }
+    return Tap::None;
+}
+
+// Runs every loop on any page: finishes the countdown and announces it.
+void checkPomodoro(std::uint32_t now) {
+    if (!pomoRunning || pomoRemaining(now) != 0) {
+        return;
+    }
+    pomoRunning = false;
+    pomoPaused = false;
+    pomoDone = true;
+    dirty = true;
+    if (currentPage != Page::Pomodoro && currentPage != Page::TouchCal) {
+        bannerShown = true;
+        bannerUntilMs = now + 15000;
+        drawTextBanner(tr("倒计时结束！", "Countdown finished!"), tr("点这里打开计时页", "Tap to open the timer"), kTimerColor);
+    }
 }
 
 const int kRelayRowY[4] = {32, 66, 100, 134};
@@ -1357,18 +1785,19 @@ void renderPage() {
         case Page::RelayTest: renderRelayTest(); break;
         case Page::About: renderAbout(); break;
         case Page::Messages: renderMessages(); break;
+        case Page::Desk: renderDesk(); break;
+        case Page::Macro: renderMacro(); break;
+        case Page::Pomodoro: renderPomodoro(); break;
         default: break;
     }
 }
-
-enum class Tap : std::uint8_t { None, Done, Repeat };
 
 Tap onTouch(int x, int y) {
     if (bannerShown) {
         if (y >= kBannerY && y < kBannerY + kBannerH) {
             bannerShown = false;
             returnPage = currentPage;
-            setPage(Page::Messages);
+            setPage(bannerIsTimer ? Page::Pomodoro : Page::Messages);
         } else {
             hideBanner();
         }
@@ -1399,6 +1828,33 @@ Tap onTouch(int x, int y) {
                 return Tap::Repeat;
             }
             break;
+
+        case Page::Desk:
+            if (kDeskPrev.contains(x, y)) {
+                comm::sendAction(comm::Action::PrevTrack);
+                return Tap::Done;
+            }
+            if (kDeskPlay.contains(x, y)) {
+                comm::sendAction(comm::Action::PlayPause);
+                return Tap::Done;
+            }
+            if (kDeskNext.contains(x, y)) {
+                comm::sendAction(comm::Action::NextTrack);
+                return Tap::Done;
+            }
+            break;
+
+        case Page::Macro:
+            for (int i = 0; i < desk::kMacroCount; ++i) {
+                if (macroButton(i).contains(x, y)) {
+                    fireMacro(i);
+                    return Tap::Done;
+                }
+            }
+            break;
+
+        case Page::Pomodoro:
+            return timerTouch(x, y);
 
         case Page::Menu:
             for (int i = 0; i < kHomeCount; ++i) {
@@ -1690,6 +2146,23 @@ void onRotate(int steps) {
             scrollMessages(steps);
             break;
 
+        case Page::Desk:
+            for (int i = 0; i < (steps < 0 ? -steps : steps); ++i) {
+                comm::sendAction(steps > 0 ? comm::Action::VolumeUp : comm::Action::VolumeDown);
+            }
+            break;
+
+        case Page::Macro:
+            macroField = wrap(macroField + steps, desk::kMacroCount);
+            break;
+
+        case Page::Pomodoro:
+            if (timerMode == 0 && !pomoRunning && !pomoPaused) {
+                pomoDone = false;
+                pomoMinutes = std::max(1, std::min(180, pomoMinutes + steps));
+            }
+            break;
+
         case Page::About:
             if (settingsField == 0) {
                 setBacklightSteps(steps);
@@ -1743,6 +2216,15 @@ void onShortPress() {
             break;
         case Page::Messages:
             msgScroll = 0;      // back to the newest
+            break;
+        case Page::Desk:
+            comm::sendAction(comm::Action::PlayPause);
+            break;
+        case Page::Macro:
+            fireMacro(macroField);
+            break;
+        case Page::Pomodoro:
+            pomoStartPause();
             break;
         case Page::TouchCal:
             config.touchSkipped = true;
@@ -1843,6 +2325,7 @@ void loop() {
     }
 
     checkNewMessage(now);
+    checkPomodoro(now);
     if (bannerShown && static_cast<std::int32_t>(now - bannerUntilMs) >= 0) {
         hideBanner();
     }
@@ -1864,7 +2347,7 @@ void loop() {
             if (bannerShown) {
                 bannerShown = false;
                 returnPage = currentPage;
-                setPage(Page::Messages);
+                setPage(bannerIsTimer ? Page::Pomodoro : Page::Messages);
             } else {
                 onShortPress();
             }

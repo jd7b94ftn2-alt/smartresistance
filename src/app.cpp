@@ -11,6 +11,7 @@
 #include "application_controller.h"
 #include "board_pins.h"
 #include "comm.h"
+#include "desk.h"
 #include "messages.h"
 #include "relay_backend.h"
 #include "resistance_controller.h"
@@ -323,7 +324,9 @@ const char* const kHelpText =
     "MQTT <host> [port] [user] [password] | MQTT OFF | MQTT?\n"
     "BLE <0|1> | BLE? | BLEMODE <0=cmd|1=uart bridge> | LANG <0=zh|1=en> | TOUCHCAL | TOUCH?\n"
     "MSGNEW <id> <app> <w> <h> | MSGDAT <id> <off> <b64> | MSGEND <id> | MSG? | MSGREAD | MSGCLR\n"
-    "PAGE <0..11> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
+    "IMGNEW <slot> <w> <h> | IMGDAT <slot> <off> <b64> | IMGEND <slot> | IMGCLR <slot>\n"
+    "SYS <cpu> <ram> <down> <up> | PLAY <0|1> | CI <0..3> [HH:MM] | MACRO <0..5> <action> | MACRO?\n"
+    "PAGE <0..14> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
 
 String handleCalibration(String* tokens, int count) {
     Calibration& cal = controller.calibration();
@@ -698,8 +701,12 @@ String handleCommand(const String& rawLine) {
     if (cmd == "STAT?" || cmd == "R?") {
         return statusLine();
     }
-    if (cmd.startsWith("MSG")) {
+    if (cmd.startsWith("MSG") || cmd.startsWith("IMG")) {
         return msg::handleCommand(cmd, tokens, count);
+    }
+    if (cmd == "SYS" || cmd == "PLAY" || cmd == "CI" || cmd == "MACRO" || cmd == "MACRO?" || cmd == "TIME"
+        || cmd == "WX") {
+        return desk::handleCommand(cmd, tokens, count);
     }
 
     if (cmd == "R") {
@@ -914,7 +921,7 @@ String handleCommand(const String& rawLine) {
 
     if (cmd == "PAGE") {
         if (count < 2 || !parseNumber(tokens[1], a) || a < 0 || a >= static_cast<int>(ui::Page::Count)) {
-            return "ERR PAGE <0..11>";
+            return "ERR PAGE <0..14>";
         }
         ui::setPage(static_cast<ui::Page>(static_cast<int>(a)));
         return "OK";
