@@ -92,9 +92,16 @@ BLEMODE <0|1>       0 = 指令模式，1 = 串口透传
 LANG <0|1>          屏幕语言：0 中文，1 English
 TOUCHCAL / TOUCH?   触摸校准 / 读原始触摸值
 BAUD <波特率>       串口透传波特率
-KNOB <0..3>  PAGE <0..10>  ROT <1|3>  BL <0..100>  LOCK <0|1>
+KNOB <0..3>  PAGE <0..11>  ROT <1|3>  BL <0..100>  LOCK <0|1>
 *IDN?  HELP  REBOOT
+MSGNEW <id> <app> <w> <h>      消息卡片开始（app 0 飞书 / 1 微信 / 2 其他；w≤288，h≤50）
+MSGDAT <id> <偏移> <base64>    卡片数据（2 位灰度，4 像素/字节，高位在前；成功不回复）
+MSGEND <id>                    卡片完成 → OK N=<条数> UNREAD=<未读>
+MSG? / MSGREAD / MSGCLR        查询 / 全部标为已读 / 清空
 ```
+
+消息卡片由 PC 上位机渲染（"消息转发"页），固件只显示位图，所以聊天内容不受屏幕字库限制。
+屏幕：状态栏"新消息 N"或时钟页底部的最新卡片 → 点击进入"消息"页（PAGE 11），旋钮或点上下半屏翻页，最多 30 条（存在 PSRAM，断电清空）。
 
 继电器序号 0–35 对应 `hardware/relay_map.csv` 的 ShiftBit。
 
