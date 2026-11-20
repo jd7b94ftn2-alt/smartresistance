@@ -47,6 +47,8 @@ pre{background:var(--inset);border-radius:12px;padding:10px;margin:10px 0 0;font
 .field{flex:1;min-width:0;text-align:left;font-size:16px;padding:12px;border-radius:12px;border:1px solid var(--line);background:var(--inset);color:var(--dim)}
 .field.set{color:var(--fg)}
 .quick{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.quick button{padding:7px 10px;font-size:13px}
+.filebtn{display:block;flex:1;text-align:center;font-size:15px;padding:12px 14px;border-radius:12px;background:var(--acc);color:#fff;cursor:pointer}
+.prog{height:6px;border-radius:3px;background:var(--inset);margin-top:10px;overflow:hidden}.prog i{display:block;height:100%;width:0;background:var(--acc)}
 #sheet{position:fixed;inset:0;display:none;z-index:10}
 #sheet.open{display:block}
 #sheet .back{position:absolute;inset:0;background:rgba(0,0,0,.45)}
@@ -112,6 +114,13 @@ pre{background:var(--inset);border-radius:12px;padding:10px;margin:10px 0 0;font
 </div>
 
 <div class="card">
+  <h2><span>分享到屏幕</span><span id="shState"></span></h2>
+  <div class="sub" id="shInfo">选一张图片或 txt 文本，板子收到马上显示（图片自动缩小到屏幕大小，板子保存最近 30 个）</div>
+  <div class="row"><label class="filebtn">选择图片 / txt<input id="shFile" type="file" accept="image/*,.txt,text/plain" style="display:none"></label></div>
+  <div class="prog"><i id="shBar"></i></div>
+</div>
+
+<div class="card">
   <h2><span>指令</span><span></span></h2>
   <div class="row" style="margin-top:0"><input id="cin" type="text" placeholder="例如 HELP、STAT?、R 4.7k" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" enterkeyhint="send"><button onclick="sendCin()">发送</button></div>
   <div class="quick"><button onclick="cmd('STAT?')">STAT?</button><button onclick="cmd('TEMP?')">TEMP?</button><button onclick="cmd('PB?')">PB?</button><button onclick="cmd('HID?')">HID?</button><button onclick="cmd('ANCS?')">ANCS?</button><button onclick="cmd('MEM?')">MEM?</button><button onclick="cmd('HELP')">HELP</button></div>
@@ -167,7 +176,17 @@ const bleLink = {
     this.chain = p.catch(() => {});
     return p;
   },
-  async state() { return JSON.parse(await this.cmd("STATE?")); }
+  async state() { return JSON.parse(await this.cmd("STATE?")); },
+  // A command without a reply (FILEDAT): queued behind the others, no wait for an answer.
+  send(c) {
+    const run = async () => {
+      const data = new TextEncoder().encode(c + "\n");
+      for (let i = 0; i < data.length; i += 180) await this.rx.writeValueWithoutResponse(data.slice(i, i + 180));
+    };
+    const p = this.chain.then(run, run);
+    this.chain = p.catch(() => {});
+    return p;
+  }
 };
 
 function setLink(text, cls) { const b = $("link"); b.textContent = text; b.className = "badge " + (cls || ""); }
@@ -273,8 +292,97 @@ function render() {
   }
 }
 
+// ---- share a picture / text file to the screen (firmware 1.8.0+) ----
+// Pictures: scaled to fit 320 x 240 on a canvas and re-encoded as JPEG. Text: UTF-8 / UTF-16 / GB18030
+// decoded and sent as UTF-8. Wi-Fi: one HTTP upload; Bluetooth: FILEDAT lines in windows of 24, each
+// window checked with FILEPOS? (the board drops a line when its queue is full; then we resend from there).
+let uploading = false;
+function shInfo(text, state) { $("shInfo").textContent = text; $("shState").textContent = state || ""; }
+function shProgress(f) { $("shBar").style.width = Math.round(Math.max(0, Math.min(1, f)) * 100) + "%"; }
+async function pictureJpeg(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => bad(new Error("图片打不开")); i.src = url; });
+    const s = Math.min(1, 320 / img.naturalWidth, 240 / img.naturalHeight);
+    const w = Math.max(1, Math.round(img.naturalWidth * s)), h = Math.max(1, Math.round(img.naturalHeight * s));
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    const g = c.getContext("2d"); g.fillStyle = "#000"; g.fillRect(0, 0, w, h); g.drawImage(img, 0, 0, w, h);
+    const blob = await new Promise(ok => c.toBlob(ok, "image/jpeg", 0.85));
+    return new Uint8Array(await blob.arrayBuffer());
+  } finally { URL.revokeObjectURL(url); }
+}
+async function textUtf8(file) {
+  const raw = new Uint8Array(await file.arrayBuffer());
+  let text;
+  if (raw[0] === 0xFF && raw[1] === 0xFE) text = new TextDecoder("utf-16le").decode(raw);
+  else if (raw[0] === 0xFE && raw[1] === 0xFF) text = new TextDecoder("utf-16be").decode(raw);
+  else { try { text = new TextDecoder("utf-8", {fatal: true}).decode(raw); } catch (e) { text = new TextDecoder("gb18030").decode(raw); } }
+  const data = new TextEncoder().encode(text.replace(/\r\n/g, "\n"));
+  return data.length > 1048576 ? data.slice(0, 1048576) : data;
+}
+function crc32(d) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < d.length; i++) { crc ^= d[i]; for (let k = 0; k < 8; k++) crc = (crc >>> 1) ^ (0xEDB88320 & -(crc & 1)); }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+function shortName(name) {            // the board keeps up to 3 words of the name
+  const p = name.trim().split(/\s+/);
+  return (p.length > 3 ? p.slice(0, 2).concat(p.slice(2).join("_")) : p).join(" ").slice(0, 60) || "文件";
+}
+async function uploadHttp(kind, data, name) {
+  const fd = new FormData();
+  fd.append("file", new Blob([data]), "upload.bin");
+  const r = await fetch(`/api/upload?kind=${kind}&size=${data.length}&name=${encodeURIComponent(name)}`, {method: "POST", body: fd});
+  const t = (await r.text()).trim();
+  if (!t.startsWith("OK")) throw new Error(t || "HTTP " + r.status);
+  return t;
+}
+async function uploadLines(kind, data, name) {
+  const first = await link.cmd(`FILENEW ${kind} ${data.length} ${name}`);
+  if (!first.startsWith("OK")) throw new Error(first || "板子没回应（固件要 1.8.0 以上）");
+  let pos = 0, stalls = 0;
+  while (pos < data.length) {
+    const start = pos;
+    for (let n = 0; n < 24 && pos < data.length; n++) {
+      const chunk = data.subarray(pos, pos + 120);
+      link.send(`FILEDAT ${pos} ${btoa(String.fromCharCode(...chunk))}`);
+      pos += chunk.length;
+    }
+    const r = (await link.cmd("FILEPOS?")).split(/\s+/);
+    if (r[0] !== "FILEPOS") throw new Error("传输中断");
+    const got = parseInt(r[1], 10);
+    stalls = got <= start ? stalls + 1 : 0;
+    if (stalls > 5) throw new Error("板子收不到数据");
+    pos = got;
+    shProgress(pos / data.length);
+  }
+  const end = await link.cmd("FILEEND " + crc32(data).toString(16).padStart(8, "0"));
+  if (!end.startsWith("OK")) throw new Error(end || "保存失败");
+  return end;
+}
+$("shFile").addEventListener("change", async e => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file || !link || uploading) return;
+  const isText = /\.(txt|log|md|csv|ini|json)$/i.test(file.name) || (file.type || "").startsWith("text/");
+  uploading = true;
+  try {
+    shProgress(0);
+    shInfo("正在处理 " + file.name + " …", "");
+    const data = isText ? await textUtf8(file) : await pictureJpeg(file);
+    const kb = (data.length / 1024).toFixed(1), t0 = Date.now();
+    shInfo(`正在发送 ${file.name}（${kb} KB）…`, "发送中");
+    const kind = isText ? "TXT" : "IMG";
+    if (link === httpLink) await uploadHttp(kind, data, shortName(file.name));
+    else await uploadLines(kind, data, shortName(file.name));
+    shProgress(1);
+    shInfo(`已显示在板子上：${file.name}（${kb} KB，${((Date.now() - t0) / 1000).toFixed(1)} 秒）`, "完成");
+  } catch (err) { shInfo("发送失败：" + err.message, "失败"); }
+  uploading = false;
+});
+
 async function poll() {
-  if (!link || polling) return;
+  if (!link || polling || uploading) return;
   polling = true;
   try { st = await link.state(); render(); setLink(link.name + " 已连接", "ok"); }
   catch (e) { setLink(link.name + " 无响应", "bad"); }
