@@ -345,7 +345,7 @@ const char* const kHelpText =
     "WXLOC <lat> <lon> [city] | WXLOC? | WXLOC OFF | IPHONE?\n"
     "FILENEW <IMG|TXT> <bytes> <name> | FILEDAT <off> <b64> | FILEPOS? | FILEEND <crc32> | FILES? | FILEOPEN <id> | FILEDEL <id|ALL>\n"
     "HID? | ANCS? | MEM? | CLEAN | REMOTE <VOLUP|VOLDOWN|PLAY|NEXT|PREV|SHUTTER|MUTE|UP|DOWN|HOME> | UNPAIR\n"
-    "GAME? | GAME <NEW|LEFT|RIGHT|ROT|DROP|PAUSE|RESUME>\n"
+    "GAME? | GAME <NEW|LEFT|RIGHT|ROT|DROP|PAUSE|RESUME> | UI TAP <x> <y> | UI TURN <n> | UI PRESS\n"
     "PAGE <0..20> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
 
 String handleCalibration(String* tokens, int count) {
@@ -928,6 +928,20 @@ String handleCommand(const String& rawLine) {
     }
     if (cmd.startsWith("FILE")) {
         return share::handleCommand(cmd, tokens, count);
+    }
+    if (cmd == "UI" && count >= 2) {         // test hook: UI TAP <x> <y> | UI TURN <steps> | UI PRESS
+        String action = tokens[1];
+        action.toUpperCase();
+        if (action == "TAP" && count >= 4) {
+            ui::injectTap(tokens[2].toInt(), tokens[3].toInt());
+        } else if (action == "TURN" && count >= 3) {
+            ui::injectTurn(tokens[2].toInt());
+        } else if (action == "PRESS") {
+            ui::injectPress();
+        } else {
+            return "ERR UI TAP <x> <y> | UI TURN <steps> | UI PRESS";
+        }
+        return "OK";
     }
 
     if (cmd == "R") {

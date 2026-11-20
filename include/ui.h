@@ -48,5 +48,9 @@ String screenshot(int firstRow, int rows);
 int closeApps();                       // returns how many were closed
 // Breadcrumb of the 分享 viewer if the last reset was a watchdog / panic while it was drawing, else 0.
 std::uint32_t bootDiag();
+// Test hook (UI TAP / TURN / PRESS): queued and handled by loop() exactly like the touch panel / knob.
+void injectTap(int x, int y);
+void injectTurn(int steps);
+void injectPress();
 
 }  // namespace ui

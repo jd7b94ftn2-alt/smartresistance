@@ -113,6 +113,7 @@ STATE?                         一行 JSON 状态（同 /api/state；手机网�
 HID? / UNPAIR                  蓝牙键盘：已配对 / 已连接台数；清除所有配对
 REMOTE <VOLUP|VOLDOWN|PLAY|NEXT|PREV|SHUTTER|MUTE|UP|DOWN|HOME>   经蓝牙键盘发给手机（SHUTTER = 音量+ = iPhone 相机快门）
 ANCS?                          iPhone 通知链路状态：LINK=1 已订阅，RX=收到条数，ERR=最近的错误
+UI TAP <x> <y> | UI TURN <n> | UI PRESS   测试用：模拟点屏幕 / 转旋钮 / 按旋钮（和真的触摸、旋钮走同一条路径）
 CLEAN                          一键清理（同"资源"页的清理按钮）：关闭后台应用（暂停中的方块游戏、倒计时、秒表），
                                再释放已读消息卡片和空闲图片缓冲 → OK FREED=<字节> MSGS=<条> APPS=<关闭的应用数>
 MEM?                           资源占用：HEAP=内部 RAM 空闲/总量 MIN=开机以来最低 BLOCK=最大连续块，PSRAM= 同上；

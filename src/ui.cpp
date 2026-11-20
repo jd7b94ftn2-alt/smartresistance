@@ -4092,6 +4092,26 @@ std::uint32_t bootDiag() {
     return bootCrumb;
 }
 
+namespace {
+int injectedTapX = -1;
+int injectedTapY = -1;
+int injectedTurn = 0;
+bool injectedPress = false;
+}  // namespace
+
+void injectTap(int x, int y) {
+    injectedTapX = std::max(0, std::min(kWidth - 1, x));
+    injectedTapY = std::max(0, std::min(kHeight - 1, y));
+}
+
+void injectTurn(int steps) {
+    injectedTurn += steps;
+}
+
+void injectPress() {
+    injectedPress = true;
+}
+
 int closeApps() {
     int closed = 0;
     const game::State gs = game::state();
@@ -4174,8 +4194,23 @@ void loop() {
     }
 
     pollTouch(now);
+    if (injectedTapX >= 0) {                 // UI TAP (tests)
+        if (bannerShown) {
+            hideBanner();
+        } else {
+            onTouch(injectedTapX, injectedTapY);
+        }
+        injectedTapX = injectedTapY = -1;
+        dirty = true;
+    }
+    if (injectedPress) {                     // UI PRESS
+        injectedPress = false;
+        onShortPress();
+        dirty = true;
+    }
 
-    const int steps = takeEncoderSteps();
+    const int steps = takeEncoderSteps() + injectedTurn;
+    injectedTurn = 0;
     if (steps != 0) {
         if (bannerShown) {
             hideBanner();    // first turn only dismisses the banner
