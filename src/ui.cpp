@@ -9,6 +9,7 @@
 #include <ctime>
 #include <utility>
 
+#include "ancs.h"
 #include "app.h"
 #include "board_pins.h"
 #include "comm.h"
@@ -2221,6 +2222,9 @@ void renderRemote() {
     label(21, 16, 36, 288, hosts > 0 ? tr("手机已连接", "Phone connected") : tr("等待手机连接", "Waiting for a phone"),
         Font::Large, hosts > 0 ? kGood : kWarn, TL_DATUM, kCard);
     String hint = tr("旋钮 = 音量，按下 = 播放/暂停", "Knob = volume, press = play");
+    if (ancs::connected()) {
+        hint = tr("旋钮 = 音量 · iPhone 通知已同步", "Knob = volume · iPhone alerts on");
+    }
     if (hosts == 0) {
         hint = String(tr("手机 设置 → 蓝牙 → ", "Phone: Bluetooth -> ")) + comm::bleName();
     }

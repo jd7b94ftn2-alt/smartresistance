@@ -109,6 +109,10 @@ USBMODE <PC|PBANK> / USBMODE?  USB-C 口角色：PC = 连电脑（默认），PB
 PB?                            充电宝数据：PB MODE= LINK= CHIP= AGE= SOC= SOH= CELLS= CELL1= CELL2= TEMP=
                                IN=<mV>/<mA> OUT=<mV>/<mA> I=<电池电流mA，充+放-> P=<W> CYC= MODEL= SN= DATE= PROTO=
 PBLOG?                         充电宝链路日志（最近 20 行，充电宝模式下没有 USB 串口，用蓝牙看）
+STATE?                         一行 JSON 状态（同 /api/state；手机网页蓝牙模式用）
+HID? / UNPAIR                  蓝牙键盘：已配对 / 已连接台数；清除所有配对
+REMOTE <VOLUP|VOLDOWN|PLAY|NEXT|PREV|SHUTTER|MUTE|UP|DOWN|HOME>   经蓝牙键盘发给手机（SHUTTER = 音量+ = iPhone 相机快门）
+ANCS?                          iPhone 通知链路状态：LINK=1 已订阅，RX=收到条数，ERR=最近的错误
 SHOT [起始行] [行数]           截屏：SHOT 320 240 <行> <行数>，然后每行 "<y> <base64>"，内容是 RLE：[次数-1][RGB565 高][低]；
                                界面先画在 PSRAM 帧缓冲里，所以和屏幕接线无关（host/tools/screenshot.py 存 PNG）
 ```
@@ -124,6 +128,18 @@ SHOT [起始行] [行数]           截屏：SHOT 320 240 <行> <行数>，然�
 点横幅或按旋钮进入消息列表，转旋钮或点别处只收起横幅（不会误改下面页面的数值）。
 
 继电器序号 0–35 对应 `hardware/relay_map.csv` 的 ShiftBit。
+
+## 手机（1.5.0 起）
+
+- **蓝牙键盘 / 手机遥控**：板子同时是一个蓝牙键盘（BLE HID，"Just Works" 配对不用 PIN，最多 3 台）。
+  iPhone：设置 → 蓝牙 → 其他设备里点 SmartR-XXXX。之后首页"遥控"页：旋钮 = 音量，按下 = 播放/暂停，
+  按钮 上一首 / 下一首 / 拍照（音量+，相机快门）/ 上翻 / 下翻 / 静音 / 主页 / 清除配对。
+  电脑也可以这样配对：板子没插电脑 USB 时，快捷键页和 USB 旋钮页改经蓝牙键盘发送。
+- **iPhone 通知上屏**（ANCS）：配对后板子自动订阅 iPhone 通知，新通知（应用 · 标题 + 内容）做成卡片，和电脑转发的一样弹横幅、进"消息"页。
+  iPhone 上该设备的设置里要打开"共享系统通知"。字库 `data/font_text16.bin` 由 `tools/make_textfont.py` 用 Noto Sans SC（OFL）生成：GB2312 全部汉字，16 px 2 位灰度。
+- **手机网页**：`docs/index.html`，同一个页面两种用法：
+  - Wi-Fi：手机连板子热点（或同一个 Wi-Fi），浏览器开 `http://192.168.4.1` / 板子 IP，由板子自己提供（编译时 `tools/embed_web.py` 压缩嵌入）；
+  - 蓝牙：https://jd7b94ftn2-alt.github.io/smartresistance/ （GitHub Pages，`docs/` 目录）。安卓 / 电脑 Chrome 直接用，iPhone 要用 Bluefy 浏览器（Safari 不支持网页蓝牙）。
 
 ## 充电宝（USB 主机，1.4.0 起）
 

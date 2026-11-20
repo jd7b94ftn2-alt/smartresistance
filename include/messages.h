@@ -46,6 +46,8 @@ int unread();
 bool get(int index, Message& out);     // 0 = newest
 void markAllRead();
 void clear();
+// Stores a card rendered on the board itself (iPhone notifications, ancs.cpp); same 2-bit format.
+bool addCard(App app, int width, int height, const std::uint8_t* pixels);
 std::uint32_t revision();              // changes whenever a card is added or removed
 
 }  // namespace msg

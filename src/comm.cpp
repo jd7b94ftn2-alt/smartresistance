@@ -18,6 +18,7 @@
 #include <ctime>
 #include <string>
 
+#include "ancs.h"
 #include "app.h"
 #include "ble_hid.h"
 #include "board_pins.h"
@@ -501,6 +502,7 @@ void startBle() {
     service->start();
 
     blehid::begin(server);
+    ancs::begin();                                 // iPhone notifications on the encrypted link
 
     // Advertising: flags + keyboard appearance + HID service + name (24 of 31 bytes);
     // scan response: the Nordic UART service the host app and the web page look for.
@@ -668,6 +670,8 @@ void loop() {
             }
         }
     }
+
+    ancs::loop();
 
     // BLE commands queued by the NimBLE task.
     BleLine bleLine;

@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "ancs.h"
 #include "application_controller.h"
 #include "board_pins.h"
 #include "comm.h"
@@ -334,7 +335,7 @@ const char* const kHelpText =
     "IMGNEW <slot> <w> <h> | IMGDAT <slot> <off> <b64> | IMGEND <slot> | IMGCLR <slot>\n"
     "SYS <cpu> <ram> <down> <up> | PLAY <0|1> | CI <0..3> [HH:MM] | MACRO <0..5> <action> | MACRO?\n"
     "USBMODE <PC|PBANK> | USBMODE? | PB? | PBLOG? | SHOT [row] [rows] | STATE?\n"
-    "HID? | REMOTE <VOLUP|VOLDOWN|PLAY|NEXT|PREV|SHUTTER|MUTE|UP|DOWN|HOME> | UNPAIR\n"
+    "HID? | ANCS? | REMOTE <VOLUP|VOLDOWN|PLAY|NEXT|PREV|SHUTTER|MUTE|UP|DOWN|HOME> | UNPAIR\n"
     "PAGE <0..17> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
 
 String handleCalibration(String* tokens, int count) {
@@ -1031,6 +1032,9 @@ String handleCommand(const String& rawLine) {
     }
     if (cmd == "PB?") {
         return pbank::statusLine();
+    }
+    if (cmd == "ANCS?") {
+        return ancs::status();
     }
     if (cmd == "HID?") {
         return String("HID HOSTS=") + comm::bleKeyboardHosts() + " BONDS=" + comm::bleBondCount();

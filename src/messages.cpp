@@ -214,6 +214,32 @@ String handleCommand(const String& cmd, const String* tokens, int count) {
     return "ERR unknown MSG command";
 }
 
+bool addCard(App app, int width, int height, const std::uint8_t* pixels) {
+    if (width < 8 || width > kMaxWidth || height < 8 || height > kMaxHeight || pixels == nullptr) {
+        return false;
+    }
+    const int index = (newest + 1) % kMaxMessages;
+    Slot& slot = slots[index];
+    if (slot.data == nullptr) {
+        slot.data = allocate(kSlotBytes);
+        if (slot.data == nullptr) {
+            return false;
+        }
+    }
+    memcpy(slot.data, pixels, static_cast<std::size_t>((width + 3) / 4) * height);
+    slot.info.id = 0xFFFF;
+    slot.info.app = app;
+    slot.info.width = static_cast<std::uint16_t>(width);
+    slot.info.height = static_cast<std::uint16_t>(height);
+    slot.info.receivedMs = millis();
+    slot.info.pixels = slot.data;
+    newest = index;
+    stored = std::min(stored + 1, kMaxMessages);
+    unreadCount = std::min(unreadCount + 1, kMaxMessages);
+    ++rev;
+    return true;
+}
+
 int count() {
     return stored;
 }
