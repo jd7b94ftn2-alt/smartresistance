@@ -9,7 +9,7 @@
 // BLE, TCP, HTTP). All of it runs on the Arduino loop task.
 namespace app {
 
-constexpr const char* kFirmwareVersion = "1.3.2";
+constexpr const char* kFirmwareVersion = "1.4.0";
 
 // Relay indices for the raw/test interface: 0..35 = shift-chain bits (hardware/relay_map.csv),
 // 36..39 = spare driver outputs, 40 = K_OUT.
@@ -39,6 +39,9 @@ struct Settings {
     String mqttUser;
     String mqttPass;
     bool bleBridge = false;         // BLE carries the J_DBG UART instead of commands
+    // USB-C role, applied at boot: false = USB device for the PC (CDC + HID),
+    // true = USB host for the power bank (pbank.h); then commands go over BLE / Wi-Fi only.
+    bool usbHost = false;
     // Touch: screen = A * raw, A = {a, b, c, d, e, f}: x = a*rx + b*ry + c, y = d*rx + e*ry + f,
     // valid for touchRotation; rotation 1 <-> 3 is handled as a 180 degree flip.
     bool touchValid = false;
@@ -52,6 +55,12 @@ void loop();
 
 Settings& settings();
 void saveSettings();
+// Restarts after delayMs (lets a reply reach BLE / TCP first); output is opened before the reset.
+void scheduleReboot(std::uint32_t delayMs);
+// Switches the USB-C role (saved, takes effect through a reboot). Returns false if unchanged.
+bool setUsbHostMode(bool host);
+// True when this boot fell back to PC mode (crash in power-bank mode, or knob held at power-up).
+bool usbHostFallback();
 
 // ---- resistance ----
 const smart_resistance::AppState& state();

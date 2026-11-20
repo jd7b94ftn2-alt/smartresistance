@@ -2,6 +2,7 @@
 
 #include <Preferences.h>
 #include <Wire.h>
+#include <esp_system.h>
 
 #include <cctype>
 #include <cmath>
@@ -13,6 +14,7 @@
 #include "comm.h"
 #include "desk.h"
 #include "messages.h"
+#include "pbank.h"
 #include "relay_backend.h"
 #include "resistance_controller.h"
 #include "ui.h"
@@ -102,6 +104,10 @@ int tempLogUsed = 0;
 
 constexpr std::uint32_t kCalibrationMagic = 0x53524331;  // "SRC1"
 
+bool rebootPending = false;
+std::uint32_t rebootAtMs = 0;
+bool hostFallback = false;
+
 void loadSettings() {
     prefs.begin("smartr", false);
     config.wifiSsid = prefs.getString("ssid", "");
@@ -124,6 +130,7 @@ void loadSettings() {
     config.mqttUser = prefs.getString("mq_user", "");
     config.mqttPass = prefs.getString("mq_pass", "");
     config.bleBridge = prefs.getBool("blebr", false);
+    config.usbHost = prefs.getBool("usbh", false);
     config.touchValid = prefs.getBool("tvalid", false);
     config.touchSkipped = prefs.getBool("tskip", false);
     config.touchRotation = prefs.getUChar("trot", 1);
@@ -326,7 +333,8 @@ const char* const kHelpText =
     "MSGNEW <id> <app> <w> <h> | MSGDAT <id> <off> <b64> | MSGEND <id> | MSG? | MSGREAD | MSGCLR\n"
     "IMGNEW <slot> <w> <h> | IMGDAT <slot> <off> <b64> | IMGEND <slot> | IMGCLR <slot>\n"
     "SYS <cpu> <ram> <down> <up> | PLAY <0|1> | CI <0..3> [HH:MM] | MACRO <0..5> <action> | MACRO?\n"
-    "PAGE <0..14> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
+    "USBMODE <PC|PBANK> | USBMODE? | PB? | PBLOG?\n"
+    "PAGE <0..16> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
 
 String handleCalibration(String* tokens, int count) {
     Calibration& cal = controller.calibration();
@@ -395,6 +403,22 @@ void begin() {
     loadSettings();
     controller.setSolverEnabled(config.solver);
 
+    // Power-bank mode takes the USB port away from the PC, and the board has no BOOT button, so
+    // there are two ways back to PC mode that work even if that mode misbehaves: a crash reset
+    // (panic / watchdog) while in it, or holding the knob button at power-up.
+    if (config.usbHost) {
+        pinMode(board::kEncoderSwitch, INPUT_PULLUP);
+        delay(5);
+        const esp_reset_reason_t reason = esp_reset_reason();
+        const bool crashed = reason == ESP_RST_PANIC || reason == ESP_RST_INT_WDT || reason == ESP_RST_TASK_WDT
+            || reason == ESP_RST_WDT;
+        if (crashed || digitalRead(board::kEncoderSwitch) == LOW) {
+            config.usbHost = false;
+            prefs.putBool("usbh", false);
+            hostFallback = true;
+        }
+    }
+
     Wire.begin(board::kI2cSda, board::kI2cScl, 400000);
     Wire.setTimeOut(20);
 
@@ -405,6 +429,12 @@ void begin() {
 
 void loop() {
     const std::uint32_t now = millis();
+    if (rebootPending && static_cast<std::int32_t>(now - rebootAtMs) >= 0) {
+        controller.process({AppEventType::SetOutput, 0});
+        saveSettings();
+        delay(50);
+        ESP.restart();
+    }
     serviceSweep(now);
     serviceRelayCycle(now);
 
@@ -428,6 +458,25 @@ Settings& settings() {
     return config;
 }
 
+void scheduleReboot(std::uint32_t delayMs) {
+    rebootPending = true;
+    rebootAtMs = millis() + delayMs;
+}
+
+bool setUsbHostMode(bool host) {
+    if (host == config.usbHost) {
+        return false;
+    }
+    config.usbHost = host;
+    saveSettings();
+    scheduleReboot(800);
+    return true;
+}
+
+bool usbHostFallback() {
+    return hostFallback;
+}
+
 void saveSettings() {
     prefs.putString("ssid", config.wifiSsid);
     prefs.putString("pass", config.wifiPass);
@@ -449,6 +498,7 @@ void saveSettings() {
     prefs.putString("mq_user", config.mqttUser);
     prefs.putString("mq_pass", config.mqttPass);
     prefs.putBool("blebr", config.bleBridge);
+    prefs.putBool("usbh", config.usbHost);
     prefs.putBool("tvalid", config.touchValid);
     prefs.putBool("tskip", config.touchSkipped);
     prefs.putUChar("trot", config.touchRotation);
@@ -921,7 +971,7 @@ String handleCommand(const String& rawLine) {
 
     if (cmd == "PAGE") {
         if (count < 2 || !parseNumber(tokens[1], a) || a < 0 || a >= static_cast<int>(ui::Page::Count)) {
-            return "ERR PAGE <0..14>";
+            return "ERR PAGE <0..16>";
         }
         ui::setPage(static_cast<ui::Page>(static_cast<int>(a)));
         return "OK";
@@ -960,6 +1010,29 @@ String handleCommand(const String& rawLine) {
         saveSettings();
         comm::restartMqtt();
         return String("OK TOPIC=") + comm::mqttTopicBase();
+    }
+    if (cmd == "USBMODE?" || (cmd == "USBMODE" && count < 2)) {
+        return String("USBMODE=") + (config.usbHost ? "PBANK" : "PC") + " RUNNING=" + (pbank::active() ? "PBANK" : "PC");
+    }
+    if (cmd == "USBMODE") {
+        String mode = tokens[1];
+        mode.toUpperCase();
+        bool host = false;
+        if (mode == "PBANK" || mode == "HOST" || mode == "1") {
+            host = true;
+        } else if (mode != "PC" && mode != "DEVICE" && mode != "0") {
+            return "ERR USBMODE <PC|PBANK>";
+        }
+        if (!setUsbHostMode(host)) {
+            return String("OK USBMODE=") + (host ? "PBANK" : "PC");
+        }
+        return String("OK USBMODE=") + (host ? "PBANK" : "PC") + " REBOOTING";
+    }
+    if (cmd == "PB?") {
+        return pbank::statusLine();
+    }
+    if (cmd == "PBLOG?") {
+        return pbank::logText();
     }
     if (cmd == "BLE?") {
         return String("BLE=") + (comm::bleEnabled() ? "1" : "0") + " MODE=" + (comm::bleBridge() ? "UART" : "CMD")

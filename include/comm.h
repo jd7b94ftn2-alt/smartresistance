@@ -16,6 +16,10 @@ enum class KnobMode : std::uint8_t { Volume, Scroll, Media, Arrows, Count };
 void begin();
 void loop();
 
+// False in power-bank mode: the USB port is a host for the power bank (pbank.h), so there is no
+// USB serial and no USB HID (knob, shortcuts, media keys) until the board is switched back to PC.
+bool usbDeviceActive();
+
 // ---- Wi-Fi ----
 void restartWifi();                  // applies app::settings() credentials (empty SSID = AP only)
 bool wifiConnected();

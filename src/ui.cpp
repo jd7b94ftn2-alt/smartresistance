@@ -14,6 +14,7 @@
 #include "font_zh16.h"
 #include "font_zh24.h"
 #include "messages.h"
+#include "pbank.h"
 
 namespace ui {
 namespace {
@@ -349,16 +350,18 @@ struct HomeEntry {
     std::uint8_t icon;         // homeIcon() index
 };
 
-// 4 x 3 grid: instrument row, desk-assistant row, connectivity row.
+// 5 x 3 grid: instrument row, desk-assistant row, connectivity row.
 const HomeEntry kHome[] = {
     {"电阻", "Ohm", Page::Resistor, rgb(0x2A9DF4), 0},
     {"NTC", "NTC", Page::Ntc, rgb(0x22C55E), 1},
     {"继电器", "Relay", Page::RelayTest, rgb(0xEF4444), 7},
     {"曲线", "Log", Page::TempLog, rgb(0x14B8A6), 5},
+    {"充电宝", "PBank", Page::PowerBank, rgb(0x84CC16), 13},
     {"桌面", "Desk", Page::Desk, rgb(0x0EA5E9), 9},
     {"快捷键", "Keys", Page::Macro, rgb(0xF59E0B), 10},
     {"计时", "Timer", Page::Pomodoro, rgb(0xE11D48), 11},
     {"时钟", "Clock", Page::Info, rgb(0xEC4899), 6},
+    {"消息", "Msgs", Page::Messages, rgb(0x06B6D4), 12},
     {"蓝牙", "BLE", Page::Bluetooth, rgb(0x6366F1), 2},
     {"旋钮", "Knob", Page::Knob, rgb(0xA855F7), 3},
     {"串口", "UART", Page::Serial, rgb(0xF97316), 4},
@@ -398,6 +401,7 @@ const char* pageTitle(Page page) {
         case Page::Macro: return tr("快捷键", "Shortcuts");
         case Page::Pomodoro: return tr("计时", "Timer");
         case Page::NtcPick: return tr("NTC 规格", "NTC type");
+        case Page::PowerBank: return tr("充电宝", "Power bank");
         default: return "";
     }
 }
@@ -486,6 +490,10 @@ void drawStatusBar() {
     } else if (swRunning && currentPage != Page::Pomodoro) {
         right = String(tr("秒表 ", "Watch ")) + mmss(stopwatchMs(millis()));
         rightColor = rgb(0xFB7185);
+    } else if (pbank::link() == pbank::Link::Online && currentPage != Page::PowerBank) {
+        const pbank::Data bank = pbank::snapshot();
+        right = String(tr("充电宝", "PB ")) + String(bank.soc) + "%";
+        rightColor = bank.soc <= 20 ? kBad : kGood;
     } else {
         if (app::tempValid()) {
             right += String(app::boardTempC(), 1) + "°C ";
@@ -508,7 +516,7 @@ int digitX(int i) {
 const Rect kOutputButton = {10, 196, 300, 38};
 
 Rect homeTile(int i) {
-    return Rect{static_cast<std::int16_t>(4 + (i % 4) * 79), static_cast<std::int16_t>(30 + (i / 4) * 70), 75, 66};
+    return Rect{static_cast<std::int16_t>(2 + (i % 5) * 64), static_cast<std::int16_t>(30 + (i / 5) * 70), 60, 66};
 }
 
 // Small line icons for the home tiles, drawn around (cx, cy) in about 18 x 18 px.
@@ -588,6 +596,20 @@ void homeIcon(int index, int cx, int cy, std::uint16_t c, std::uint16_t bg) {
             thickLine(cx, cy + 2, cx, cy - 3, c, bg);
             thickLine(cx, cy + 2, cx + 3, cy + 4, c, bg);
             thickLine(cx - 3, cy - 9, cx + 3, cy - 9, c, bg);
+            break;
+        case 12:  // envelope
+            tft.drawRoundRect(cx - 9, cy - 6, 19, 13, 2, c);
+            tft.drawRoundRect(cx - 8, cy - 5, 17, 11, 2, c);
+            thickLine(cx - 7, cy - 4, cx, cy + 1, c, bg);
+            thickLine(cx, cy + 1, cx + 7, cy - 4, c, bg);
+            break;
+        case 13:  // battery with a bolt
+            tft.drawRoundRect(cx - 9, cy - 5, 16, 11, 2, c);
+            tft.drawRoundRect(cx - 8, cy - 4, 14, 9, 2, c);
+            tft.fillRect(cx + 7, cy - 2, 3, 5, c);
+            thickLine(cx, cy - 4, cx - 3, cy + 1, c, bg);
+            thickLine(cx - 3, cy + 1, cx + 1, cy - 1, c, bg);
+            thickLine(cx + 1, cy - 1, cx - 2, cy + 4, c, bg);
             break;
         default:
             break;
@@ -940,8 +962,12 @@ void renderKnob() {
     label(4, 14, 88, 296, hint, Font::Small, kInfo);
     button(5, kKnobStart, knobArmed ? tr("停止", "Stop") : tr("开始", "Start"), knobArmed ? Style::Off : Style::On,
         Font::Large, false);
-    label(6, 14, 190, 296, knobArmed ? tr("旋钮的转动和按键正在发给电脑", "Knob events go to the PC")
-                                     : tr("选好模式后点开始，或按一下旋钮", "Pick a mode, then Start or press"), Font::Small, kDim);
+    if (!comm::usbDeviceActive()) {
+        label(6, 14, 190, 296, tr("USB 现在连着充电宝，旋钮暂停", "USB is on the power bank: knob off"), Font::Small, kWarn);
+    } else {
+        label(6, 14, 190, 296, knobArmed ? tr("旋钮的转动和按键正在发给电脑", "Knob events go to the PC")
+                                         : tr("选好模式后点开始，或按一下旋钮", "Pick a mode, then Start or press"), Font::Small, kDim);
+    }
     label(7, 14, 212, 296, tr("长按旋钮或点左上角返回", "Hold the knob or tap Back"), Font::Small, kDim);
 }
 
@@ -1400,8 +1426,13 @@ void renderMacro() {
         button(i, macroButton(i), name, macroFlash == i ? Style::Selected : Style::Normal,
             strlen(name) > 12 ? Font::Small : Font::Large, macroField == i);
     }
-    label(10, kWidth / 2, 218, 310, tr("转旋钮选择，按下执行；按钮内容在上位机里改", "Turn to pick, press to send"),
-        Font::Small, kDim, TC_DATUM);
+    if (comm::usbDeviceActive()) {
+        label(10, kWidth / 2, 218, 310, tr("转旋钮选择，按下执行；按钮内容在上位机里改", "Turn to pick, press to send"),
+            Font::Small, kDim, TC_DATUM);
+    } else {
+        label(10, kWidth / 2, 218, 310, tr("USB 现在连着充电宝，快捷键暂停", "USB is on the power bank: keys off"),
+            Font::Small, kWarn, TC_DATUM);
+    }
 }
 
 // ------------------------------------------------------------ timer page: countdown / stopwatch
@@ -1859,6 +1890,195 @@ void serviceCalibration(std::uint32_t now) {
     }
 }
 
+// ------------------------------------------------------------ power bank page (USB host link, pbank.h)
+const Rect kBankMode = {8, 204, 304, 32};
+constexpr int kBankTopY = 30;
+constexpr int kBankTopH = 70;
+bool bankConfirm = false;             // the mode button asks for a second press (it reboots)
+bool bankRebooting = false;
+std::uint32_t bankConfirmUntil = 0;
+
+Rect bankCell(int i) {
+    return Rect{static_cast<std::int16_t>(6 + (i % 3) * 104), static_cast<std::int16_t>(104 + (i / 3) * 48), 100, 44};
+}
+
+String asciiOnly(const char* value) {
+    String out;
+    for (const char* p = value; *p != '\0'; ++p) {
+        if (*p >= 0x20 && *p < 0x7F) {
+            out += *p;
+        }
+    }
+    return out;
+}
+
+void bankModePress() {
+    if (bankRebooting) {
+        return;
+    }
+    if (!bankConfirm) {
+        bankConfirm = true;
+        bankConfirmUntil = millis() + 3000;
+        return;
+    }
+    bankConfirm = false;
+    bankRebooting = app::setUsbHostMode(!pbank::active());
+}
+
+void drawBankModeButton() {
+    if (bankConfirm && static_cast<std::int32_t>(millis() - bankConfirmUntil) >= 0) {
+        bankConfirm = false;
+    }
+    const char* caption = nullptr;
+    if (bankRebooting) {
+        caption = tr("正在重启…", "Rebooting…");
+    } else if (bankConfirm) {
+        caption = tr("再按一次确认（会重启）", "Press again to reboot");
+    } else if (pbank::active()) {
+        caption = tr("切回电脑模式（重启）", "Back to PC mode (reboot)");
+    } else {
+        caption = tr("切到充电宝模式（重启）", "Power bank mode (reboot)");
+    }
+    button(30, kBankMode, caption, bankConfirm || bankRebooting ? Style::Off : Style::Accent, Font::Small, false);
+}
+
+void renderBankHelp() {
+    if (changed(0, "", 2)) {
+        panel(6, kBankTopY, 308, 168, 10, kCard);
+    }
+    int y = 40;
+    if (app::usbHostFallback()) {
+        label(1, 16, y, 288, tr("充电宝模式异常，已回到电脑模式", "Fell back to PC mode"), Font::Small, kWarn, TL_DATUM, kCard);
+        y += 22;
+    }
+    label(2, 16, y, 288, tr("现在 USB 连着电脑（串口、快捷键）", "USB is on the PC (serial, keys)"), Font::Small, kInfo,
+        TL_DATUM, kCard);
+    label(3, 16, y + 22, 288, tr("1. 点下方按钮切到充电宝模式", "1. Switch to power bank mode"), Font::Small, kFg,
+        TL_DATUM, kCard);
+    label(4, 16, y + 44, 288, tr("2. 充电宝三击，进入通信模式", "2. Click the bank's key 3 times"), Font::Small, kFg,
+        TL_DATUM, kCard);
+    label(5, 16, y + 66, 288, tr("3. 用 C 对 C 线接到本板 USB 口", "3. C-to-C cable into this board"), Font::Small, kFg,
+        TL_DATUM, kCard);
+    label(6, 16, y + 88, 288, tr("之后电脑改用蓝牙或 WiFi 连接", "The PC then uses BLE / Wi-Fi"), Font::Small, kDim,
+        TL_DATUM, kCard);
+    label(7, 16, y + 110, 288, tr("开机按住旋钮可强制回电脑模式", "Hold the knob at power-up: PC"), Font::Small, kDim,
+        TL_DATUM, kCard);
+}
+
+void renderPowerBank() {
+    drawBankModeButton();
+    if (!pbank::active()) {
+        renderBankHelp();
+        return;
+    }
+    const pbank::Data d = pbank::snapshot();
+    const pbank::Link link = pbank::link();
+    const bool live = link == pbank::Link::Online && d.valid && d.ageMs < 5000;
+    const std::int32_t ma = pbank::batteryCurrentMa(d);
+
+    // ---- top panel: battery gauge, SOC, link state
+    if (changed(0, "", 1)) {
+        panel(6, kBankTopY, 308, kBankTopH, 10, kCard);
+    }
+    const int soc = live ? std::min<int>(d.soc, 100) : -1;
+    const std::uint16_t level = soc < 0 ? kBorder : (soc <= 20 ? kBad : (soc <= 50 ? kWarn : kGood));
+    if (changed(1, "", static_cast<std::uint32_t>(soc + 1) | (static_cast<std::uint32_t>(level) << 8))) {
+        const int bx = 16;
+        const int by = 49;
+        const int bw = 50;
+        const int bh = 32;
+        tft.fillRect(bx - 2, by - 2, bw + 12, bh + 4, kCard);
+        panel(bx, by, bw, bh, 6, kFg, kCard);
+        panel(bx + 3, by + 3, bw - 6, bh - 6, 4, kCard, kFg);
+        panel(bx + bw + 1, by + 10, 5, 12, 2, kFg, kCard);
+        if (soc > 0) {
+            panel(bx + 5, by + 5, std::max(4, (bw - 10) * soc / 100), bh - 10, 3, level, kCard);
+        }
+    }
+    bigNumber(2, 176, 41, 100, live ? String(d.soc) : String("--"), live ? kFg : kDim, TR_DATUM, kCard);
+    label(3, 180, 64, 22, "%", Font::Large, kDim, TL_DATUM, kCard);
+
+    const char* line1 = "";
+    const char* line2 = "";
+    std::uint16_t color1 = kDim;
+    std::uint16_t color2 = kDim;
+    switch (link) {
+        case pbank::Link::Waiting:
+            line1 = tr("等待充电宝", "Waiting");
+            line2 = tr("三击后插线", "3 clicks, plug");
+            color1 = kWarn;
+            break;
+        case pbank::Link::Foreign:
+            line1 = tr("不是充电宝", "Not a bank");
+            line2 = tr("需9347X固件", "Need 9347X");
+            color1 = kBad;
+            break;
+        case pbank::Link::Starting:
+            line1 = tr("正在连接…", "Linking…");
+            color1 = kInfo;
+            break;
+        case pbank::Link::Online:
+            line1 = live ? tr("已连接", "Online") : tr("数据过期", "Stale");
+            color1 = live ? kGood : kWarn;
+            if (live) {
+                line2 = ma > 30 ? tr("充电中", "Charging") : (ma < -30 ? tr("放电中", "Discharging") : tr("静置", "Idle"));
+                color2 = ma > 30 ? kGood : (ma < -30 ? kWarn : kDim);
+            }
+            break;
+        case pbank::Link::NoReply:
+            line1 = tr("充电宝无应答", "No reply");
+            line2 = tr("重新三击试试", "Click 3x");
+            color1 = kBad;
+            break;
+        case pbank::Link::Error:
+            line1 = tr("USB 启动失败", "USB error");
+            color1 = kBad;
+            break;
+        default:
+            break;
+    }
+    label(4, 208, 36, 100, line1, Font::Small, color1, TL_DATUM, kCard);
+    label(5, 208, 56, 100, line2, Font::Small, color2, TL_DATUM, kCard);
+    String model = asciiOnly(d.model);
+    if (model.length() == 0) {
+        model = d.chip;
+    }
+    label(6, 208, 76, 100, model, Font::Small, kDim, TL_DATUM, kCard);
+
+    // ---- value cells
+    static const char* const zh[6] = {"电压", "电流", "功率", "温度", "健康", "循环"};
+    static const char* const en[6] = {"Voltage", "Current", "Power", "Temp", "Health", "Cycles"};
+    String values[6];
+    std::uint16_t colors[6];
+    for (int i = 0; i < 6; ++i) {
+        values[i] = "--";
+        colors[i] = live ? kFg : kDim;
+    }
+    if (live) {
+        const std::uint32_t mv = d.cells >= 2 ? static_cast<std::uint32_t>(d.cellMv[0]) + d.cellMv[1] : d.cellMv[0];
+        values[0] = String(mv / 1000.0f, 3) + "V";
+        values[1] = ma > 0 ? "+" : "";
+        values[1] += String(ma / 1000.0f, 2) + "A";
+        colors[1] = ma > 30 ? kGood : (ma < -30 ? kWarn : kFg);
+        values[2] = String(d.powerMw / 1000.0f, 2) + "W";
+        if (d.tempValid) {
+            values[3] = String(d.tempC, 1) + "°C";
+        }
+        values[4] = String(d.soh) + "%";
+        if (d.cyclesValid) {
+            values[5] = String(d.cycles) + tr("次", "");
+        }
+    }
+    for (int i = 0; i < 6; ++i) {
+        const Rect r = bankCell(i);
+        if (changed(10 + i, "", 1)) {
+            panel(r.x, r.y, r.w, r.h, 8, kCard);
+            text(tr(zh[i], en[i]), r.x + 8, r.y + 3, Font::Small, kDim, kCard, 0, TL_DATUM, 2);
+        }
+        label(20 + i, r.x + 8, r.y + 31, r.w - 12, values[i], Font::Large, colors[i], ML_DATUM, kCard);
+    }
+}
+
 // ------------------------------------------------------------ page switching / dispatch
 void clearContent() {
     useFont(Font::Builtin);
@@ -1902,6 +2122,7 @@ void enterPage(Page page) {
         msgScroll = 0;
         msg::markAllRead();
     }
+    bankConfirm = false;
     if (page == Page::Menu) {
         for (int i = 0; i < kHomeCount; ++i) {
             if (kHome[i].page == returnPage) {
@@ -1940,6 +2161,7 @@ void renderPage() {
         case Page::Macro: renderMacro(); break;
         case Page::Pomodoro: renderPomodoro(); break;
         case Page::NtcPick: renderNtcPick(); break;
+        case Page::PowerBank: renderPowerBank(); break;
         default: break;
     }
 }
@@ -2010,6 +2232,13 @@ Tap onTouch(int x, int y) {
 
         case Page::NtcPick:
             return ntcPickTouch(x, y);
+
+        case Page::PowerBank:
+            if (kBankMode.contains(x, y)) {
+                bankModePress();
+                return Tap::Done;
+            }
+            break;
 
         case Page::Menu:
             for (int i = 0; i < kHomeCount; ++i) {
@@ -2387,6 +2616,9 @@ void onShortPress() {
             break;
         case Page::NtcPick:
             ntcPickPress();
+            break;
+        case Page::PowerBank:
+            bankModePress();
             break;
         case Page::TouchCal:
             config.touchSkipped = true;

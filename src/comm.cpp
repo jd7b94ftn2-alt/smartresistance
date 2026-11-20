@@ -5,6 +5,7 @@
 #include <NimBLEDevice.h>
 #include <PubSubClient.h>
 #include <USB.h>
+#include <USBCDC.h>
 #include <USBHIDConsumerControl.h>
 #include <USBHIDKeyboard.h>
 #include <USBHIDMouse.h>
@@ -19,11 +20,17 @@
 
 #include "app.h"
 #include "board_pins.h"
+#include "pbank.h"
 
 namespace comm {
 namespace {
 
-// ---------------------------------------------------------------- USB HID
+// ---------------------------------------------------------------- USB (device mode)
+// The USB port is started by begin() only in PC mode (ARDUINO_USB_CDC_ON_BOOT=0), because in
+// power-bank mode the same controller runs as a USB host. `Serial` is therefore UART0 (J_DBG).
+USBCDC usbSerial(0);
+HardwareSerial& bridgeUart = Serial;
+bool usbDevice = false;
 USBHIDConsumerControl consumerControl;
 USBHIDMouse hidMouse;
 USBHIDKeyboard hidKeyboard;
@@ -510,9 +517,9 @@ void serviceBridge() {
     }
 
     std::uint8_t buffer[128];
-    int available = Serial0.available();
+    int available = bridgeUart.available();
     while (available > 0) {
-        const int length = Serial0.read(buffer, std::min(available, static_cast<int>(sizeof(buffer))));
+        const int length = bridgeUart.read(buffer, std::min(available, static_cast<int>(sizeof(buffer))));
         if (length <= 0) {
             break;
         }
@@ -528,7 +535,7 @@ void serviceBridge() {
             }
             ++bridgeRev;
         }
-        available = Serial0.available();
+        available = bridgeUart.available();
     }
 
     if (bridgeClient && bridgeClient.connected()) {
@@ -538,7 +545,7 @@ void serviceBridge() {
             if (length <= 0) {
                 break;
             }
-            Serial0.write(buffer, length);
+            bridgeUart.write(buffer, length);
             pending = bridgeClient.available();
         }
     }
@@ -580,17 +587,22 @@ void begin() {
     mqttBase = String("smartr/") + macHex;
     mqttClientId = String("smartr-") + macHex;
 
-    USB.productName("SmartResistance");
-    USB.manufacturerName("SmartR");
-    consumerControl.begin();
-    hidMouse.begin();
-    hidKeyboard.begin();
-    USB.begin();
-    Serial.begin(115200);
-    Serial.setTimeout(5);
+    if (app::settings().usbHost) {
+        pbank::begin();              // USB host for the power bank; commands over BLE / Wi-Fi
+    } else {
+        USB.productName("SmartResistance");
+        USB.manufacturerName("SmartR");
+        consumerControl.begin();
+        hidMouse.begin();
+        hidKeyboard.begin();
+        usbSerial.begin(115200);
+        usbSerial.setTimeout(5);
+        USB.begin();
+        usbDevice = true;
+    }
 
-    Serial0.setRxBufferSize(2048);   // must precede begin()
-    Serial0.begin(app::settings().bridgeBaud, SERIAL_8N1, board::kUartRx, board::kUartTx);
+    bridgeUart.setRxBufferSize(2048);   // must precede begin()
+    bridgeUart.begin(app::settings().bridgeBaud, SERIAL_8N1, board::kUartRx, board::kUartTx);
 
     bleOn = app::settings().bleEnabled;
     bleRawMode = app::settings().bleBridge;
@@ -603,11 +615,11 @@ void loop() {
     // USB serial commands.
     String line;
     int budget = 256;
-    while (Serial.available() > 0 && budget-- > 0) {
-        if (usbLine.feed(static_cast<char>(Serial.read()), line)) {
+    while (usbDevice && usbSerial.available() > 0 && budget-- > 0) {
+        if (usbLine.feed(static_cast<char>(usbSerial.read()), line)) {
             const String reply = app::handleCommand(line);
             if (reply.length() > 0) {
-                Serial.println(reply);
+                usbSerial.println(reply);
             }
         }
     }
@@ -616,7 +628,7 @@ void loop() {
     BleLine bleLine;
     while (bleQueue != nullptr && xQueueReceive(bleQueue, &bleLine, 0) == pdTRUE) {
         if (bleLine.raw) {
-            Serial0.write(reinterpret_cast<const std::uint8_t*>(bleLine.text), bleLine.length);
+            bridgeUart.write(reinterpret_cast<const std::uint8_t*>(bleLine.text), bleLine.length);
             continue;
         }
         const String reply = app::handleCommand(bleLine.text);
@@ -759,7 +771,11 @@ String bleName() {
 }
 
 void setBridgeBaud(std::uint32_t baud) {
-    Serial0.updateBaudRate(baud);
+    bridgeUart.updateBaudRate(baud);
+}
+
+bool usbDeviceActive() {
+    return usbDevice;
 }
 
 std::uint32_t bridgeRevision() {
@@ -798,6 +814,9 @@ const char* knobModeName(KnobMode mode) {
 }
 
 void knobRotate(KnobMode mode, int steps) {
+    if (!usbDevice) {
+        return;
+    }
     const int count = steps < 0 ? -steps : steps;
     for (int i = 0; i < count; ++i) {
         switch (mode) {
@@ -824,6 +843,9 @@ void knobRotate(KnobMode mode, int steps) {
 }
 
 void knobClick(KnobMode mode) {
+    if (!usbDevice) {
+        return;
+    }
     switch (mode) {
         case KnobMode::Volume:
             consumerControl.press(CONSUMER_CONTROL_MUTE);
@@ -866,6 +888,9 @@ void consumerKey(std::uint16_t usage) {
 }  // namespace
 
 void sendAction(Action action) {
+    if (!usbDevice) {
+        return;
+    }
     switch (action) {
         case Action::Screenshot: chord(KEY_LEFT_GUI, KEY_LEFT_SHIFT, 's'); break;
         case Action::Lock: chord(KEY_LEFT_GUI, 0, 'l'); break;

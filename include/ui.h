@@ -23,6 +23,7 @@ enum class Page : std::uint8_t {
     Macro,
     Pomodoro,
     NtcPick,
+    PowerBank,
     Count,
 };
 
