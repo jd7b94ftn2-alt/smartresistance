@@ -2275,8 +2275,8 @@ constexpr int kCell = 11;
 constexpr int kWellX = 105;
 constexpr int kWellY = 29;
 const Rect kGameWell = {kWellX, kWellY, game::kCols * kCell, game::kRows * kCell};
-const Rect kGameLeft = {6, 136, 44, 98};
-const Rect kGameRight = {54, 136, 44, 98};
+const Rect kGameLeft = {6, 158, 44, 76};
+const Rect kGameRight = {54, 158, 44, 76};
 const Rect kGamePause = {222, 100, 92, 30};
 const Rect kGameRotate = {222, 136, 92, 46};
 const Rect kGameDrop = {222, 188, 92, 46};
@@ -2300,7 +2300,7 @@ String ohmsScore(std::uint32_t v) {
     if (v < 1000000) {
         return String(v / 1000.0f, v < 10000 ? 2 : (v < 100000 ? 1 : 0)) + "kΩ";
     }
-    return String(v / 1000000.0f, 2) + "MΩ";
+    return String(v / 1000000.0f, 1) + "MΩ";
 }
 
 void drawGameCell(int px, int py, int type) {
@@ -2349,12 +2349,13 @@ void renderGame() {
     gfx->fillRect(0, kBar + 1, kWidth, kHeight - kBar - 1, kBg);
 
     // score card
-    panel(6, 30, 92, 100, 10, kCard);
-    text(tr("得分", "Score"), 14, 36, Font::Small, kDim, kCard, 0, TL_DATUM, 2, false);
+    panel(6, 30, 92, 122, 10, kCard);
+    text(tr("得分", "Pts"), 14, 36, Font::Small, kDim, kCard, 0, TL_DATUM, 2, false);
+    text(String(tr("级 ", "Lv ")) + game::level(), 90, 36, Font::Small, kFg, kCard, 0, TR_DATUM, 2, false);
     text(ohmsScore(game::score()), 14, 57, Font::Large, kInfo, kCard, 0, TL_DATUM, 2, false);
-    text(String(tr("最高", "Best ")) + ohmsScore(game::best()), 12, 86, Font::Small, kDim, kCard, 0, TL_DATUM, 2, false);
-    text(String(tr("行 ", "Ln ")) + game::lines() + tr("  级 ", "  Lv ") + game::level(), 12, 106, Font::Small, kFg,
-        kCard, 0, TL_DATUM, 2, false);
+    text(tr("最高", "Best"), 14, 88, Font::Small, kDim, kCard, 0, TL_DATUM, 2, false);
+    text(ohmsScore(game::best()), 14, 108, Font::Small, kFg, kCard, 0, TL_DATUM, 2, false);
+    text(String(tr("消行 ", "Rows ")) + game::lines(), 14, 128, Font::Small, kDim, kCard, 0, TL_DATUM, 2, false);
 
     // left / right pads
     const bool playing = st == game::State::Playing;
