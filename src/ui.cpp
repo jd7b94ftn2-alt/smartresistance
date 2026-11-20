@@ -505,9 +505,24 @@ void drawBackButton() {
     const Rect r = {3, 3, 62, 20};
     gfx->fillRect(r.x, r.y, r.w, r.h, kBarColor);
     panel(r.x, r.y, r.w, r.h, 10, kButton, kBarColor);
-    thickLine(16, 13, 11, 8, kFg, kButton);
+    thickLine(16, 8, 11, 13, kFg, kButton);      // "<" chevron
     thickLine(11, 13, 16, 18, kFg, kButton);
     text(tr("返回", "Back"), 21, 13, Font::Small, kFg, kButton, 0, ML_DATUM, 2);
+}
+
+// Status-bar glyphs. Wi-Fi: a fan of three arcs above (cx, by); Bluetooth: the rune around (cx, cy).
+void wifiGlyph(int cx, int by, std::uint16_t c) {
+    gfx->fillSmoothCircle(cx, by - 1, 2, c, kBarColor);
+    gfx->drawSmoothArc(cx, by, 8, 6, 135, 225, c, kBarColor, true);
+    gfx->drawSmoothArc(cx, by, 13, 11, 135, 225, c, kBarColor, true);
+}
+
+void bleGlyph(int cx, int cy, std::uint16_t c) {
+    thickLine(cx - 4, cy - 3, cx + 3, cy + 4, c, kBarColor, 1.6f);
+    thickLine(cx + 3, cy + 4, cx, cy + 7, c, kBarColor, 1.6f);
+    thickLine(cx, cy + 7, cx, cy - 7, c, kBarColor, 1.6f);
+    thickLine(cx, cy - 7, cx + 3, cy - 4, c, kBarColor, 1.6f);
+    thickLine(cx + 3, cy - 4, cx - 4, cy + 3, c, kBarColor, 1.6f);
 }
 
 void drawStatusBar() {
@@ -532,14 +547,29 @@ void drawStatusBar() {
         const pbank::Data bank = pbank::snapshot();
         right = String(tr("充电宝", "PB ")) + String(bank.soc) + "%";
         rightColor = bank.soc <= 20 ? kBad : kGood;
-    } else {
-        if (app::tempValid()) {
-            right += String(app::boardTempC(), 1) + "°C ";
-        }
-        right += comm::wifiConnected() ? "WiFi " : (comm::accessPointActive() ? "AP " : "");
-        right += comm::bleConnected() ? "BT" : "";
     }
-    label(kSlotStatus, 262, 5, 90, right, Font::Small, rightColor, TR_DATUM, kBarColor);
+    if (right.length() > 0) {
+        label(kSlotStatus, 262, 5, 96, right, Font::Small, rightColor, TR_DATUM, kBarColor);
+    } else {
+        // Idle: board temperature, then Wi-Fi (white = router, amber = own hotspot) and Bluetooth
+        // (blue = a phone / PC is connected, grey = advertising) as glyphs.
+        const std::uint32_t wifi = comm::wifiConnected() ? 2U : (comm::accessPointActive() ? 1U : 0U);
+        const std::uint32_t ble = !comm::bleEnabled() ? 0U : (comm::bleConnected() ? 2U : 1U);
+        String temp;
+        if (app::tempValid()) {
+            temp = String(app::boardTempC(), 1) + "°C";
+        }
+        if (changed(kSlotStatus, temp, 0x10000U | wifi | (ble << 4))) {
+            gfx->fillRect(164, 1, 100, 24, kBarColor);
+            text(temp, 222, 13, Font::Small, kDim, kBarColor, 0, MR_DATUM, 2);
+            if (wifi != 0) {
+                wifiGlyph(236, 20, wifi == 2 ? kFg : kWarn);
+            }
+            if (ble != 0) {
+                bleGlyph(256, 13, ble == 2 ? kInfo : kDim);
+            }
+        }
+    }
 
     const auto& st = app::state();
     button(kSlotOut, Rect{268, 4, 48, 18}, st.fault ? "ERR" : (st.outputEnabled ? "ON" : "OFF"),
@@ -953,7 +983,11 @@ void setBleOn(bool on) {
 }
 
 void renderBluetooth() {
-    label(0, 14, 34, 296, comm::bleName(), Font::Large, kFg);
+    // name (Large, 36..63) and status (Small, 66..86) on a card 30..92
+    if (changed(7, "", 1)) {
+        panel(6, 30, 308, 62, 10, kCard);
+    }
+    label(0, 16, 36, 288, comm::bleName(), Font::Large, kFg, TL_DATUM, kCard);
     String status;
     std::uint16_t color = kInfo;
     if (!comm::bleEnabled()) {
@@ -965,19 +999,19 @@ void renderBluetooth() {
     } else {
         status = tr("等待连接（广播中）", "Advertising, waiting");
     }
-    label(1, 14, 68, 296, status, Font::Small, color);
+    label(1, 16, 66, 288, status, Font::Small, color, TL_DATUM, kCard);
     const bool bridge = comm::bleBridge();
-    button(2, kBleMode[0], tr("指令模式", "Commands"), bridge ? Style::Normal : Style::On, Font::Small, bleField == 0);
-    button(3, kBleMode[1], tr("串口透传", "UART bridge"), bridge ? Style::On : Style::Normal, Font::Small, bleField == 0);
+    button(2, kBleMode[0], tr("指令模式", "Commands"), bridge ? Style::Normal : Style::Selected, Font::Small, bleField == 0);
+    button(3, kBleMode[1], tr("串口透传", "UART bridge"), bridge ? Style::Selected : Style::Normal, Font::Small, bleField == 0);
     button(4, kBleToggle, comm::bleEnabled() ? tr("关闭蓝牙", "Turn Bluetooth off") : tr("打开蓝牙", "Turn Bluetooth on"),
-        comm::bleEnabled() ? Style::Off : Style::On, Font::Large, bleField == 1);
+        comm::bleEnabled() ? Style::Normal : Style::On, Font::Large, bleField == 1);
     if (bridge) {
         label(5, 14, 192, 296, tr("手机收发的数据直通 J_DBG 串口", "Phone data goes straight to J_DBG"), Font::Small, kDim);
         label(6, 14, 214, 296, String(tr("波特率 ", "Baud ")) + String(app::settings().bridgeBaud)
             + tr("（在串口页修改）", " (set on Serial page)"), Font::Small, kDim);
     } else {
-        label(5, 14, 192, 296, tr("手机用 nRF Toolbox 或 Serial Bluetooth", "Use nRF Toolbox / Serial Bluetooth"), Font::Small, kDim);
-        label(6, 14, 214, 296, tr("Terminal 扫描连接，发 HELP 看指令", "Terminal, then send HELP"), Font::Small, kDim);
+        label(5, 14, 192, 296, tr("手机用 nRF Toolbox / Serial Bluetooth", "Use nRF Toolbox / Serial Bluetooth"), Font::Small, kDim);
+        label(6, 14, 214, 296, tr("Terminal 连接后发 HELP 看指令", "Terminal, then send HELP"), Font::Small, kDim);
     }
 }
 
@@ -1204,7 +1238,7 @@ void renderInfo() {
             kInfo, TC_DATUM);
     } else {
         bigNumber(0, kWidth / 2, 32, 300, "--:--:--", kDim, TC_DATUM);
-        label(1, kWidth / 2, 88, 300, tr("等待对时：打开上位机「桌面助手」或连 Wi-Fi", "Waiting for time (PC host or Wi-Fi)"),
+        label(1, kWidth / 2, 88, 300, tr("等待对时：上位机「桌面助手」或 Wi-Fi", "Waiting for time: PC host or Wi-Fi"),
             Font::Small, kDim, TC_DATUM);
     }
 
@@ -1463,7 +1497,7 @@ void renderMacro() {
             strlen(name) > 12 ? Font::Small : Font::Large, macroField == i);
     }
     if (comm::usbDeviceActive()) {
-        label(10, kWidth / 2, 218, 310, tr("转旋钮选择，按下执行；按钮内容在上位机里改", "Turn to pick, press to send"),
+        label(10, kWidth / 2, 218, 300, tr("转旋钮选择，按下执行；上位机可改按钮", "Turn to pick, press to send"),
             Font::Small, kDim, TC_DATUM);
     } else {
         label(10, kWidth / 2, 218, 310, tr("USB 现在连着充电宝，快捷键暂停", "USB is on the power bank: keys off"),
@@ -1701,16 +1735,21 @@ void toggleRelayCycle() {
     }
 }
 
-const Rect kLightMinus = {150, 114, 50, 30};
-const Rect kLightPlus = {262, 114, 50, 30};
-const Rect kFlipButton = {10, 152, 96, 32};
-const Rect kLangButton = {112, 152, 96, 32};
-const Rect kCalButton = {214, 152, 96, 32};
-const Rect kTouchOffButton = {214, 194, 96, 32};
+const Rect kLightMinus = {64, 106, 40, 28};
+const Rect kLightPlus = {270, 106, 40, 28};
+const Rect kFlipButton = {10, 144, 96, 32};
+const Rect kLangButton = {112, 144, 96, 32};
+const Rect kCalButton = {214, 144, 96, 32};
+const Rect kTouchOffButton = {214, 192, 96, 32};
 
 void renderAbout() {
     const app::Settings& config = app::settings();
-    label(0, 10, 30, 300, String(tr("固件 ", "Firmware ")) + app::kFirmwareVersion + "   " + comm::bleName(), Font::Small, kInfo);
+    // device card: three 20 px lines (34 / 54 / 74) inside 30..98
+    if (changed(13, "", 1)) {
+        panel(6, 30, 308, 68, 10, kCard);
+    }
+    label(0, 16, 34, 288, String(tr("固件 ", "Firmware ")) + app::kFirmwareVersion + "  ·  " + comm::bleName(), Font::Small,
+        kFg, TL_DATUM, kCard);
     String wifi;
     if (comm::wifiConnected()) {
         wifi = "Wi-Fi " + config.wifiSsid + "  " + comm::ipAddress();
@@ -1719,25 +1758,27 @@ void renderAbout() {
     } else {
         wifi = String(tr("正在连接 ", "Connecting ")) + config.wifiSsid;
     }
-    label(1, 10, 50, 300, wifi, Font::Small, kFg);
-    label(2, 10, 70, 300, String(tr("网页 http://", "Web http://")) + comm::ipAddress() + "  TCP 5025", Font::Small, kFg);
+    label(1, 16, 54, 288, wifi, Font::Small, kDim, TL_DATUM, kCard);
     const String mqtt = comm::mqttStatus();
     const char* remote = mqtt == "off" ? tr("未配置", "not set")
         : (mqtt == "connected" ? tr("已连接", "online") : tr("未连接", "offline"));
-    label(3, 10, 90, 300, String(tr("蓝牙 ", "BLE ")) + (comm::bleEnabled() ? (comm::bleConnected() ? tr("已连接", "connected")
+    label(2, 16, 74, 288, String(tr("蓝牙 ", "BLE ")) + (comm::bleEnabled() ? (comm::bleConnected() ? tr("已连接", "connected")
         : tr("广播中", "advertising")) : tr("已关闭", "off")) + tr("    远程 ", "    Remote ") + remote,
-        Font::Small, mqtt == "connected" ? kGood : kFg);
+        Font::Small, mqtt == "connected" ? kGood : kDim, TL_DATUM, kCard);
 
-    label(4, 10, 121, 130, tr("背光亮度", "Backlight"), Font::Small, settingsField == 0 ? kAccent : kFg);
+    // backlight: [-] bar value [+]
+    label(4, 14, 120, 48, tr("背光", "Light"), Font::Small, settingsField == 0 ? kAccent : kFg, ML_DATUM);
     button(5, kLightMinus, "-", Style::Normal, Font::Large, false);
-    label(6, 231, 121, 56, String(config.backlight) + "%", Font::Small, kFg, TC_DATUM);
-    button(7, kLightPlus, "+", Style::Normal, Font::Large, false);
-    button(8, kFlipButton, tr("屏幕翻转", "Flip"), Style::Normal, Font::Small, settingsField == 1);
-    button(9, kLangButton, config.language == 1 ? "中文" : "English", Style::Normal, Font::Small, settingsField == 2);
-    button(10, kCalButton, tr("触摸校准", "Calibrate"), Style::Accent, Font::Small, settingsField == 3);
-    label(11, 10, 202, 200, config.touchValid ? tr("触摸：已校准", "Touch: calibrated") : tr("触摸：未校准", "Touch: not set"),
-        Font::Small, config.touchValid ? kGood : kDim);
-    button(12, kTouchOffButton, tr("关闭触摸", "Touch off"), config.touchValid ? Style::Off : Style::Disabled, Font::Small, false);
+    bar(6, 112, 116, 112, 8, config.backlight, settingsField == 0 ? kAccent : kInfo);
+    label(7, 247, 120, 40, String(config.backlight) + "%", Font::Small, kFg, MC_DATUM);
+    button(8, kLightPlus, "+", Style::Normal, Font::Large, false);
+
+    button(9, kFlipButton, tr("屏幕翻转", "Flip"), Style::Normal, Font::Small, settingsField == 1);
+    button(10, kLangButton, config.language == 1 ? "中文" : "English", Style::Normal, Font::Small, settingsField == 2);
+    button(11, kCalButton, tr("触摸校准", "Calibrate"), Style::Normal, Font::Small, settingsField == 3);
+    label(12, 14, 208, 196, config.touchValid ? tr("触摸：已校准", "Touch: calibrated") : tr("触摸：未校准", "Touch: not set"),
+        Font::Small, config.touchValid ? kGood : kDim, ML_DATUM);
+    button(14, kTouchOffButton, tr("关闭触摸", "Touch off"), config.touchValid ? Style::Muted : Style::Disabled, Font::Small, false);
 }
 
 void setBacklightSteps(int steps) {
