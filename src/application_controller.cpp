@@ -152,21 +152,20 @@ bool ApplicationController::setOutput(bool enabled) {
     return true;
 }
 
+// Adds delta x (selected digit's weight) with carry / borrow into the higher digits
+// (999 + 1 -> 1000, 1000 - 1 -> 999), clamped to 0 .. 999999 instead of wrapping.
 bool ApplicationController::adjustSelectedDigit(std::int32_t delta) {
     const std::uint32_t multiplier = kDigitMultipliers[state_.selectedDigit];
-    const std::int32_t oldDigit = static_cast<std::int32_t>((state_.targetOhms / multiplier) % 10UL);
-    std::int32_t newDigit = (oldDigit + delta) % 10;
-    if (newDigit < 0) {
-        newDigit += 10;
+    std::int64_t candidate = static_cast<std::int64_t>(state_.targetOhms)
+        + static_cast<std::int64_t>(delta) * multiplier;
+    if (candidate < 0) {
+        candidate = 0;
+    } else if (candidate > kMaximumResistanceOhms) {
+        candidate = kMaximumResistanceOhms;
     }
-
-    const std::int32_t difference = newDigit - oldDigit;
-    const std::int64_t candidate = static_cast<std::int64_t>(state_.targetOhms)
-        + static_cast<std::int64_t>(difference) * multiplier;
-    if (candidate < 0 || candidate > kMaximumResistanceOhms) {
-        return false;
+    if (static_cast<std::uint32_t>(candidate) == state_.targetOhms) {
+        return false;          // already at the limit
     }
-
     return applyTarget(static_cast<std::uint32_t>(candidate));
 }
 
