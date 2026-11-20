@@ -109,6 +109,8 @@ USBMODE <PC|PBANK> / USBMODE?  USB-C 口角色：PC = 连电脑（默认），PB
 PB?                            充电宝数据：PB MODE= LINK= CHIP= AGE= SOC= SOH= CELLS= CELL1= CELL2= TEMP=
                                IN=<mV>/<mA> OUT=<mV>/<mA> I=<电池电流mA，充+放-> P=<W> CYC= MODEL= SN= DATE= PROTO=
 PBLOG?                         充电宝链路日志（最近 20 行，充电宝模式下没有 USB 串口，用蓝牙看）
+SHOT [起始行] [行数]           截屏：SHOT 320 240 <行> <行数>，然后每行 "<y> <base64>"，内容是 RLE：[次数-1][RGB565 高][低]；
+                               界面先画在 PSRAM 帧缓冲里，所以和屏幕接线无关（host/tools/screenshot.py 存 PNG）
 ```
 
 1.4.0 起主页是 5×3：电阻 NTC 继电器 曲线 充电宝 / 桌面 快捷键 计时 时钟 消息 / 蓝牙 旋钮 串口 设置。

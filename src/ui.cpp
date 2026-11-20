@@ -119,11 +119,13 @@ void useFont(Font font) {
     loadedFont = font;
 }
 
+// fillBox = false: no line-height background box (smooth fonts still blend with bg). Use it for text on a
+// surface that was just painted (buttons), where the 20 / 27 px box could stick out of the shape.
 void text(const String& value, int x, int y, Font font, std::uint16_t fg, std::uint16_t bg, int padding,
-    std::uint8_t datum, int builtinFont) {
+    std::uint8_t datum, int builtinFont, bool fillBox = true) {
     useFont(font);
     gfx->setTextDatum(datum);
-    gfx->setTextColor(fg, bg, true);
+    gfx->setTextColor(fg, bg, fillBox);
     gfx->setTextPadding(padding);
     if (font == Font::Builtin) {
         gfx->drawString(value, x, y, builtinFont);
@@ -206,7 +208,7 @@ void button(int id, const Rect& r, const String& label, Style style, Font font, 
     } else {
         panel(r.x, r.y, r.w, r.h, radius, fill, bg);
     }
-    text(label, r.x + r.w / 2, r.y + r.h / 2 + 1, font, fg, fill, 0, MC_DATUM, 2);
+    text(label, r.x + r.w / 2, r.y + r.h / 2 + 1, font, fg, fill, 0, MC_DATUM, 2, false);
 }
 
 void label(int id, int x, int y, int width, const String& value, Font font, std::uint16_t fg,
@@ -782,7 +784,7 @@ void renderNtc() {
     label(1, 14, 66, 296, String(user ? tr("自定义规格", "Custom") : tr("常用型号", "Preset")) + "   R25 "
         + String(app::ntcR25(), 0) + " Ω    B " + String(app::ntcBeta(), 0), Font::Small, kDim);
     bigNumber(2, 238, 87, 224, String(ntcEditTemp, 1), kFg, TR_DATUM, kCard);
-    const char* names[4] = {"-1", "-0.1", "+0.1", "+1"};
+    const char* names[4] = {"−1", "−0.1", "+0.1", "+1"};
     for (int i = 0; i < 4; ++i) {
         const bool focused = (ntcField == 1 && (i == 0 || i == 3)) || (ntcField == 2 && (i == 1 || i == 2));
         button(3 + i, kNtcStep[i], names[i], Style::Normal, Font::Large, focused);
@@ -1703,7 +1705,7 @@ void renderRelayTest() {
         label(row, 10, kRelayRowY[row] + 7, 70, names[row], Font::Small, kDim);
         label(4 + row, 82, kRelayRowY[row] + 7, 130, values[row], Font::Small, relayField == row ? kAccent : kFg);
         const Style style = running ? Style::Disabled : Style::Normal;
-        button(8 + row, relayMinus(row), "-", style, Font::Large, false);
+        button(8 + row, relayMinus(row), "−", style, Font::Large, false);
         button(12 + row, relayPlus(row), "+", style, Font::Large, false);
     }
     button(16, kRelayStart, running ? tr("停止", "Stop") : tr("开始", "Start"), running ? Style::Off : Style::On,
@@ -1768,7 +1770,7 @@ void renderAbout() {
 
     // backlight: [-] bar value [+]
     label(4, 14, 120, 48, tr("背光", "Light"), Font::Small, settingsField == 0 ? kAccent : kFg, ML_DATUM);
-    button(5, kLightMinus, "-", Style::Normal, Font::Large, false);
+    button(5, kLightMinus, "−", Style::Normal, Font::Large, false);
     bar(6, 112, 116, 112, 8, config.backlight, settingsField == 0 ? kAccent : kInfo);
     label(7, 247, 120, 40, String(config.backlight) + "%", Font::Small, kFg, MC_DATUM);
     button(8, kLightPlus, "+", Style::Normal, Font::Large, false);
