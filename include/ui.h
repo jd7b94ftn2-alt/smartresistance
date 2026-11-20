@@ -46,5 +46,7 @@ String screenshot(int firstRow, int rows);
 // 资源 page / CLEAN: closes what keeps running in the background (a paused 色环方块 game, the
 // countdown, the stopwatch). Instrument functions (resistance output, NTC sweep) are left alone.
 int closeApps();                       // returns how many were closed
+// Breadcrumb of the 分享 viewer if the last reset was a watchdog / panic while it was drawing, else 0.
+std::uint32_t bootDiag();
 
 }  // namespace ui

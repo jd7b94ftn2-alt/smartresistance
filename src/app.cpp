@@ -461,6 +461,10 @@ String memoryReport() {
     loopMaxUs = 0;
     lastLoopUs = 0;                            // the iteration running this report is not counted
 
+    char resetText[40];
+    snprintf(resetText, sizeof(resetText), "\nRESET=%d CRUMB=%08lx", static_cast<int>(esp_reset_reason()),
+        static_cast<unsigned long>(ui::bootDiag()));
+    out += resetText;
     out += "\nPART";
     appendPartitions(out, ESP_PARTITION_TYPE_APP);
     appendPartitions(out, ESP_PARTITION_TYPE_DATA);

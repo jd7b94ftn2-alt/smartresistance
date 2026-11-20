@@ -3,6 +3,7 @@
 #include <TFT_eSPI.h>
 #include <TJpg_Decoder.h>
 #include <esp_heap_caps.h>
+#include <esp_task_wdt.h>
 #include <mbedtls/base64.h>
 
 #include <algorithm>
@@ -2679,6 +2680,12 @@ void renderSystem() {
 }
 
 // ------------------------------------------------------------ 分享 page: pictures / text sent from the PC or phone
+RTC_NOINIT_ATTR std::uint32_t diagCrumb;   // non-zero while the viewer draws; kept across a watchdog reset
+std::uint32_t bootCrumb = 0;               // diagCrumb as found at boot (MEM? shows it)
+
+void crumb(std::uint32_t step) {           // 0xA<step><view><id 16 bits>
+    diagCrumb = (diagCrumb & 0xF00FFFFFU) | ((step & 0xFFU) << 20);
+}
 // List of the stored files (share.cpp, LittleFS), a full-screen picture viewer (JPEG, TJpg_Decoder)
 // and a paged text reader (UTF-8, the GB2312 text font). A file that just arrived opens by itself.
 enum class ShareView : std::uint8_t { List, Image, Text };
@@ -2737,7 +2744,12 @@ bool jpegBlock(std::int16_t x, std::int16_t y, std::uint16_t w, std::uint16_t h,
     if (y >= kHeight) {
         return false;
     }
-    gfx->pushImage(x, y, w, h, bitmap);
+    // pushImage is not virtual in TFT_eSPI: call the sprite's own version (gfx-> would run the panel code).
+    if (gfx == &canvas) {
+        canvas.pushImage(x, y, w, h, bitmap);
+    } else {
+        tft.pushImage(x, y, w, h, bitmap);
+    }
     return true;
 }
 
@@ -2745,6 +2757,7 @@ bool jpegBlock(std::int16_t x, std::int16_t y, std::uint16_t w, std::uint16_t h,
 bool drawJpeg(const std::uint8_t* data, std::size_t size) {
     std::uint16_t w = 0;
     std::uint16_t h = 0;
+    crumb(3);
     if (TJpgDec.getJpgSize(&w, &h, data, size) != JDR_OK || w == 0 || h == 0) {
         return false;
     }
@@ -2756,7 +2769,10 @@ bool drawJpeg(const std::uint8_t* data, std::size_t size) {
     TJpgDec.setSwapBytes(true);          // the frame buffer holds RGB565 in panel (big-endian) order
     TJpgDec.setCallback(jpegBlock);
     gfx->fillRect(0, 0, kWidth, kHeight, TFT_BLACK);
-    return TJpgDec.drawJpg((kWidth - w / scale) / 2, (kHeight - h / scale) / 2, data, size) == JDR_OK;
+    crumb(4);
+    const bool ok = TJpgDec.drawJpg((kWidth - w / scale) / 2, (kHeight - h / scale) / 2, data, size) == JDR_OK;
+    crumb(5);
+    return ok;
 }
 
 bool pushTextLine(std::uint32_t start) {
@@ -2918,7 +2934,10 @@ void renderShareImage() {
     }
     const std::uint8_t* data = nullptr;
     std::size_t size = 0;
-    if (share::load(shareId, data, size) && drawJpeg(data, size)) {
+    crumb(1);
+    const bool loaded = share::load(shareId, data, size);
+    crumb(2);
+    if (loaded && drawJpeg(data, size)) {
         return;
     }
     gfx->fillRect(0, 0, kWidth, kHeight, kBg);
@@ -2951,10 +2970,18 @@ void renderShare() {
     if (shareView != ShareView::List && share::indexOf(shareId) < 0) {
         shareView = ShareView::List;       // deleted (FILEDEL) while shown
     }
+    // Guard: a decoder / layout that never returns resets the board (task watchdog, 5 s) instead of
+    // freezing it; the breadcrumb survives that reset and MEM? reports it.
+    const bool guarded = esp_task_wdt_add(nullptr) == ESP_OK;
+    diagCrumb = 0xA0000000U | (static_cast<std::uint32_t>(shareView) << 16) | shareId;
     switch (shareView) {
         case ShareView::Image: renderShareImage(); break;
         case ShareView::Text: renderShareText(); break;
         default: renderShareList(); break;
+    }
+    diagCrumb = 0;
+    if (guarded) {
+        esp_task_wdt_delete(nullptr);
     }
 }
 
@@ -3662,6 +3689,9 @@ void onShortPress() {
 }  // namespace
 
 void begin() {
+    const esp_reset_reason_t reason = esp_reset_reason();
+    bootCrumb = (reason == ESP_RST_TASK_WDT || reason == ESP_RST_PANIC || reason == ESP_RST_INT_WDT) ? diagCrumb : 0;
+    diagCrumb = 0;
     pinMode(board::kEncoderA, INPUT_PULLUP);
     pinMode(board::kEncoderB, INPUT_PULLUP);
     pinMode(board::kEncoderSwitch, INPUT_PULLUP);
@@ -3766,6 +3796,10 @@ void startTouchCalibration() {
 
 bool touchRaw(std::uint16_t& x, std::uint16_t& y, std::uint16_t& z) {
     return readTouchRaw(x, y, z);
+}
+
+std::uint32_t bootDiag() {
+    return bootCrumb;
 }
 
 int closeApps() {
