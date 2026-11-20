@@ -19,6 +19,10 @@ void loop();
 // False in power-bank mode: the USB port is a host for the power bank (pbank.h), so there is no
 // USB serial and no USB HID (knob, shortcuts, media keys) until the board is switched back to PC.
 bool usbDeviceActive();
+bool usbHidConnected();              // PC mode and a PC has enumerated the USB port
+
+// One-line JSON status (also /api/state, MQTT state and the STATE? command used by the web page).
+String stateJson();
 
 // ---- Wi-Fi ----
 void restartWifi();                  // applies app::settings() credentials (empty SSID = AP only)
@@ -63,6 +67,17 @@ enum class Action : std::uint8_t {
     Screenshot, Lock, ShowDesktop, TaskManager, Copy, Paste, Undo, SwitchWindow,
     Mute, PlayPause, PrevTrack, NextTrack, FeishuMic, FeishuCamera, VolumeUp, VolumeDown, Count,
 };
+// Shortcuts go to USB HID when a PC has enumerated the board, otherwise to the Bluetooth keyboard.
 void sendAction(Action action);
+
+// ---- Bluetooth keyboard (BLE HID): phone remote, and shortcuts without the USB cable ----
+// Phones / PCs pair once in their Bluetooth settings ("SmartR-XXXX", no PIN) and reconnect by themselves.
+enum class Remote : std::uint8_t { VolumeUp, VolumeDown, PlayPause, Next, Prev, Shutter, Mute, PageUp, PageDown, Home, Count };
+void sendRemote(Remote remote);      // always over Bluetooth; Shutter = volume up (iPhone camera)
+const char* remoteName(Remote remote);
+bool bleKeyboardActive();            // at least one paired host is connected and listening
+int bleKeyboardHosts();
+int bleBondCount();
+void clearBlePairings();             // forget every paired phone / PC and drop their links
 
 }  // namespace comm

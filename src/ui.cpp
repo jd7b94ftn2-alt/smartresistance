@@ -406,6 +406,7 @@ const HomeEntry kHome[] = {
     {"旋钮", "Knob", Page::Knob, rgb(0xA855F7), 3},
     {"串口", "UART", Page::Serial, rgb(0xF97316), 4},
     {"设置", "Setup", Page::About, rgb(0x64748B), 8},
+    {"遥控", "Remote", Page::Remote, rgb(0x10B981), 14},
 };
 constexpr int kHomeCount = sizeof(kHome) / sizeof(kHome[0]);
 
@@ -442,6 +443,7 @@ const char* pageTitle(Page page) {
         case Page::Pomodoro: return tr("计时", "Timer");
         case Page::NtcPick: return tr("NTC 规格", "NTC type");
         case Page::PowerBank: return tr("充电宝", "Power bank");
+        case Page::Remote: return tr("手机遥控", "Phone remote");
         default: return "";
     }
 }
@@ -680,6 +682,12 @@ void homeIcon(int index, int cx, int cy, std::uint16_t c, std::uint16_t bg) {
             thickLine(cx, cy - 4, cx - 3, cy + 1, c, bg);
             thickLine(cx - 3, cy + 1, cx + 1, cy - 1, c, bg);
             thickLine(cx + 1, cy - 1, cx - 2, cy + 4, c, bg);
+            break;
+        case 14:  // phone
+            gfx->drawRoundRect(cx - 6, cy - 10, 13, 21, 3, c);
+            gfx->drawRoundRect(cx - 5, cy - 9, 11, 19, 2, c);
+            thickLine(cx - 2, cy - 6, cx + 2, cy - 6, c, bg);
+            gfx->fillSmoothCircle(cx, cy + 6, 1, c, bg);
             break;
         default:
             break;
@@ -1036,8 +1044,8 @@ void renderKnob() {
     label(4, 14, 88, 296, hint, Font::Small, kInfo);
     button(5, kKnobStart, knobArmed ? tr("停止", "Stop") : tr("开始", "Start"), knobArmed ? Style::Off : Style::On,
         Font::Large, false);
-    if (!comm::usbDeviceActive()) {
-        label(6, 14, 190, 296, tr("USB 现在连着充电宝，旋钮暂停", "USB is on the power bank: knob off"), Font::Small, kWarn);
+    if (!comm::usbHidConnected() && !comm::bleKeyboardActive()) {
+        label(6, 14, 190, 296, tr("没连电脑：电脑蓝牙里配对本板后可用", "No PC: pair the board over Bluetooth"), Font::Small, kWarn);
     } else {
         label(6, 14, 190, 296, knobArmed ? tr("旋钮的转动和按键正在发给电脑", "Knob events go to the PC")
                                          : tr("选好模式后点开始，或按一下旋钮", "Pick a mode, then Start or press"), Font::Small, kDim);
@@ -1498,11 +1506,14 @@ void renderMacro() {
         button(i, macroButton(i), name, macroFlash == i ? Style::Selected : Style::Normal,
             strlen(name) > 12 ? Font::Small : Font::Large, macroField == i);
     }
-    if (comm::usbDeviceActive()) {
+    if (comm::usbHidConnected()) {
         label(10, kWidth / 2, 218, 300, tr("转旋钮选择，按下执行；上位机可改按钮", "Turn to pick, press to send"),
             Font::Small, kDim, TC_DATUM);
+    } else if (comm::bleKeyboardActive()) {
+        label(10, kWidth / 2, 218, 300, tr("经蓝牙键盘发送；转旋钮选择，按下执行", "Sent by the Bluetooth keyboard"),
+            Font::Small, kInfo, TC_DATUM);
     } else {
-        label(10, kWidth / 2, 218, 310, tr("USB 现在连着充电宝，快捷键暂停", "USB is on the power bank: keys off"),
+        label(10, kWidth / 2, 218, 300, tr("没连电脑：电脑蓝牙里配对本板后可用", "No PC: pair the board over Bluetooth"),
             Font::Small, kWarn, TC_DATUM);
     }
 }
@@ -2164,6 +2175,75 @@ void renderPowerBank() {
     }
 }
 
+// ------------------------------------------------------------ phone remote page (Bluetooth keyboard)
+const Rect kRemoteButton[9] = {
+    {8, 98, 98, 42}, {111, 98, 98, 42}, {214, 98, 98, 42},
+    {8, 146, 98, 42}, {111, 146, 98, 42}, {214, 146, 98, 42},
+    {8, 196, 98, 36}, {111, 196, 98, 36}, {214, 196, 98, 36},
+};
+const comm::Remote kRemoteAction[8] = {
+    comm::Remote::Prev, comm::Remote::PlayPause, comm::Remote::Next,
+    comm::Remote::Shutter, comm::Remote::PageUp, comm::Remote::PageDown,
+    comm::Remote::Mute, comm::Remote::Home,
+};
+int remoteFlash = -1;
+std::uint32_t remoteFlashUntil = 0;
+bool unpairConfirm = false;
+std::uint32_t unpairConfirmUntil = 0;
+
+void remotePress(int i) {
+    if (i == 8) {                             // forget pairings: second tap within 3 s
+        if (unpairConfirm && static_cast<std::int32_t>(millis() - unpairConfirmUntil) < 0) {
+            unpairConfirm = false;
+            comm::clearBlePairings();
+        } else {
+            unpairConfirm = true;
+            unpairConfirmUntil = millis() + 3000;
+        }
+        return;
+    }
+    comm::sendRemote(kRemoteAction[i]);
+    remoteFlash = i;
+    remoteFlashUntil = millis() + 200;
+}
+
+void renderRemote() {
+    if (remoteFlash >= 0 && static_cast<std::int32_t>(millis() - remoteFlashUntil) >= 0) {
+        remoteFlash = -1;
+    }
+    if (unpairConfirm && static_cast<std::int32_t>(millis() - unpairConfirmUntil) >= 0) {
+        unpairConfirm = false;
+    }
+    const int hosts = comm::bleKeyboardHosts();
+    if (changed(20, "", 1)) {
+        panel(6, 30, 308, 62, 10, kCard);
+    }
+    label(21, 16, 36, 288, hosts > 0 ? tr("手机已连接", "Phone connected") : tr("等待手机连接", "Waiting for a phone"),
+        Font::Large, hosts > 0 ? kGood : kWarn, TL_DATUM, kCard);
+    String hint = tr("旋钮 = 音量，按下 = 播放/暂停", "Knob = volume, press = play");
+    if (hosts == 0) {
+        hint = String(tr("手机 设置 → 蓝牙 → ", "Phone: Bluetooth -> ")) + comm::bleName();
+    }
+    label(22, 16, 66, 288, hint, Font::Small, kDim, TL_DATUM, kCard);
+
+    static const char* const zh[9] = {"上一首", "播放/暂停", "下一首", "拍照", "上翻", "下翻", "静音", "主页", "清除配对"};
+    static const char* const en[9] = {"Prev", "Play", "Next", "Shutter", "Up", "Down", "Mute", "Home", "Unpair"};
+    for (int i = 0; i < 9; ++i) {
+        Style style = Style::Normal;
+        if (i == 8) {
+            style = unpairConfirm ? Style::Off : Style::Muted;
+        } else if (hosts == 0) {
+            style = Style::Disabled;
+        } else if (remoteFlash == i) {
+            style = Style::Selected;
+        } else if (i == 1) {
+            style = Style::Accent;
+        }
+        const char* caption = i == 8 && unpairConfirm ? tr("再按确认", "Again") : tr(zh[i], en[i]);
+        button(i, kRemoteButton[i], caption, style, i < 6 && i != 1 ? Font::Large : Font::Small, false);
+    }
+}
+
 // ------------------------------------------------------------ page switching / dispatch
 void clearContent() {
     useFont(Font::Builtin);
@@ -2247,6 +2327,7 @@ void renderPage() {
         case Page::Pomodoro: renderPomodoro(); break;
         case Page::NtcPick: renderNtcPick(); break;
         case Page::PowerBank: renderPowerBank(); break;
+        case Page::Remote: renderRemote(); break;
         default: break;
     }
 }
@@ -2322,6 +2403,15 @@ Tap onTouch(int x, int y) {
             if (kBankMode.contains(x, y)) {
                 bankModePress();
                 return Tap::Done;
+            }
+            break;
+
+        case Page::Remote:
+            for (int i = 0; i < 9; ++i) {
+                if (kRemoteButton[i].contains(x, y)) {
+                    remotePress(i);
+                    return Tap::Done;
+                }
             }
             break;
 
@@ -2629,6 +2719,12 @@ void onRotate(int steps) {
             macroField = wrap(macroField + steps, desk::kMacroCount);
             break;
 
+        case Page::Remote:
+            for (int i = 0; i < (steps < 0 ? -steps : steps); ++i) {
+                comm::sendRemote(steps > 0 ? comm::Remote::VolumeUp : comm::Remote::VolumeDown);
+            }
+            break;
+
         case Page::Pomodoro:
             if (timerMode == 0 && !pomoRunning && !pomoPaused) {
                 pomoDone = false;
@@ -2704,6 +2800,9 @@ void onShortPress() {
             break;
         case Page::PowerBank:
             bankModePress();
+            break;
+        case Page::Remote:
+            remotePress(1);           // play / pause
             break;
         case Page::TouchCal:
             config.touchSkipped = true;

@@ -3,6 +3,7 @@
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include <NimBLEDevice.h>
+#include <NimBLEHIDDevice.h>
 #include <PubSubClient.h>
 #include <USB.h>
 #include <USBCDC.h>
@@ -21,6 +22,7 @@
 #include "app.h"
 #include "board_pins.h"
 #include "pbank.h"
+#include "web_index.h"
 
 namespace comm {
 namespace {
@@ -84,47 +86,11 @@ constexpr const char* kApPassword = "12345678";
 constexpr std::uint32_t kStaFallbackMs = 15000;
 constexpr std::uint32_t kWeatherPeriodMs = 15UL * 60UL * 1000UL;
 
-const char kIndexHtml[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>SmartResistance</title>
-<style>
-body{font-family:system-ui,sans-serif;margin:0;padding:12px;background:#12161c;color:#e8edf2}
-h1{font-size:18px;margin:0 0 10px}.card{background:#1d242e;border-radius:8px;padding:12px;margin-bottom:10px}
-.big{font-size:34px;font-weight:600}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px}
-input,select,button{font-size:16px;padding:8px;border-radius:6px;border:1px solid #3a4656;background:#0f1319;color:#e8edf2}
-button{background:#2b6cb0;border:0;cursor:pointer}button.on{background:#2f855a}button.off{background:#9b2c2c}
-.grid{display:grid;grid-template-columns:repeat(8,1fr);gap:4px;margin-top:8px}
-.grid button{padding:6px 0;font-size:12px;background:#2d3748}.grid button.act{background:#d69e2e;color:#111}
-pre{background:#0f1319;padding:8px;border-radius:6px;white-space:pre-wrap;min-height:24px}small{color:#93a1b3}
-</style></head><body><h1>SmartResistance</h1>
-<div class="card"><div class="big" id="r">-</div><small id="s">-</small>
-<div class="row"><input id="rv" placeholder="ohms, e.g. 4.7k" size="12"><button onclick="cmd('R '+v('rv'))">Set R</button>
-<button id="ob" onclick="cmd('OUT '+(st.out?0:1))">OUT</button></div></div>
-<div class="card"><b>NTC</b><div class="row"><select id="nt" onchange="cmd('NTCSEL '+this.value)"></select>
-<input id="tv" placeholder="temp C" size="7"><button onclick="cmd('NTC '+v('tv'))">Set temp</button></div>
-<div class="row"><input id="s0" placeholder="from" size="5"><input id="s1" placeholder="to" size="5">
-<input id="s2" placeholder="step" size="5"><input id="s3" placeholder="dwell ms" size="8">
-<button onclick="cmd('SWEEP '+v('s0')+' '+v('s1')+' '+v('s2')+' '+v('s3'))">Sweep</button>
-<button class="off" onclick="cmd('SWEEP STOP')">Stop</button></div></div>
-<div class="card"><b>Relays</b> <small>manual test, 40 = K_OUT</small><div class="grid" id="g"></div>
-<div class="row"><button onclick="cmd('NORMAL')">Back to resistor mode</button></div></div>
-<div class="card"><b>Command</b><div class="row"><input id="c" size="24" placeholder="HELP">
-<button onclick="cmd(v('c'))">Send</button></div><pre id="o"></pre></div>
-<script>
-let st={};const v=i=>document.getElementById(i).value,e=i=>document.getElementById(i);
-async function cmd(c){const r=await fetch('/api/cmd?c='+encodeURIComponent(c));e('o').textContent=await r.text();poll()}
-const g=e('g');for(let i=0;i<41;i++){const b=document.createElement('button');b.textContent=i;b.id='k'+i;
-b.onclick=()=>cmd('RELAY '+i+' '+(b.classList.contains('act')?0:1));g.appendChild(b)}
-async function poll(){try{st=await (await fetch('/api/state')).json();e('r').textContent=st.r+' Ω';
-e('s').textContent='mode '+st.mode+' | est '+st.est+' Ω'+(st.mode=='NTC'?' | '+st.t+' °C':'')+
-' | board '+(st.board===null?'-':st.board+' °C');
-const ob=e('ob');ob.textContent=st.out?'OUT ON':'OUT OFF';ob.className=st.out?'on':'off';
-const nt=e('nt');if(!nt.options.length)st.types.forEach((n,i)=>nt.add(new Option(n,i)));nt.value=st.ntc;
-const w=BigInt('0x'+st.raw);for(let i=0;i<40;i++)e('k'+i).classList.toggle('act',((w>>BigInt(i))&1n)==1n);
-e('k40').classList.toggle('act',st.out)}catch(x){}}
-setInterval(poll,1000);poll();
-</script></body></html>)HTML";
+// The phone web page lives in docs/index.html (embedded as web_index.h by tools/embed_web.py).
 
-String stateJson() {
+int hidHostCount();
+
+String buildStateJson() {
     const auto& st = app::state();
     char raw[20];
     snprintf(raw, sizeof(raw), "%010llx", static_cast<unsigned long long>(st.relayPlan.shiftWord));
@@ -140,11 +106,31 @@ String stateJson() {
     json += ",\"board\":";
     json += app::tempValid() ? String(app::boardTempC(), 2) : String("null");
     json += String(",\"raw\":\"") + raw + "\"";
+    json += String(",\"lock\":") + (st.locked ? "true" : "false");
+    json += String(",\"v\":\"") + app::kFirmwareVersion + "\"";
+    json += String(",\"name\":\"") + deviceName + "\"";
+    json += String(",\"wifi\":\"") + (WiFi.status() == WL_CONNECTED ? "STA" : (apActive ? "AP" : "OFF")) + "\"";
+    json += String(",\"ip\":\"") + ipAddress() + "\"";
+    json += String(",\"usb\":\"") + (usbDevice ? "PC" : "PBANK") + "\"";
+    json += String(",\"hid\":") + hidHostCount();
     json += ",\"types\":[";
     for (int i = 0; i < app::ntcTypeCount(); ++i) {
         json += String(i ? ",\"" : "\"") + app::ntcName(i) + "\"";
     }
-    json += "]}";
+    json += "]";
+    if (pbank::active()) {
+        const pbank::Data d = pbank::snapshot();
+        json += String(",\"pb\":{\"link\":\"") + pbank::linkName(pbank::link()) + "\"";
+        if (d.valid) {
+            json += ",\"age\":" + String(d.ageMs / 1000.0f, 1) + ",\"soc\":" + String(d.soc) + ",\"soh\":" + String(d.soh);
+            json += ",\"mv\":" + String(d.cells >= 2 ? d.cellMv[0] + d.cellMv[1] : d.cellMv[0]);
+            json += ",\"ma\":" + String(pbank::batteryCurrentMa(d)) + ",\"mw\":" + String(d.powerMw);
+            json += ",\"temp\":" + (d.tempValid ? String(d.tempC, 1) : String("null"));
+            json += ",\"cyc\":" + (d.cyclesValid ? String(d.cycles) : String("null"));
+        }
+        json += "}";
+    }
+    json += "}";
     return json;
 }
 
@@ -152,8 +138,12 @@ void startNetworkServices() {
     if (servicesStarted) {
         return;
     }
-    webServer.on("/", []() { webServer.send_P(200, "text/html", kIndexHtml); });
-    webServer.on("/api/state", []() { webServer.send(200, "application/json", stateJson()); });
+    webServer.on("/", []() {
+        webServer.sendHeader("Content-Encoding", "gzip");
+        webServer.sendHeader("Cache-Control", "no-cache");
+        webServer.send_P(200, "text/html", reinterpret_cast<const char*>(kWebIndexGz), kWebIndexGzSize);
+    });
+    webServer.on("/api/state", []() { webServer.send(200, "application/json", buildStateJson()); });
     webServer.on("/api/cmd", []() {
         webServer.send(200, "text/plain", app::handleCommand(webServer.arg("c")));
     });
@@ -326,7 +316,7 @@ void serviceMqtt(bool wifiUp, std::uint32_t now) {
 
     if (mqtt.connected() && now - mqttLastCheckMs >= 1000) {
         mqttLastCheckMs = now;
-        const String state = stateJson();
+        const String state = buildStateJson();
         if (state != mqttLastState || now - mqttLastPublishMs >= kMqttStatePeriodMs) {
             if (mqtt.publish((mqttBase + "/state").c_str(), state.c_str(), true)) {
                 mqttLastState = state;
@@ -343,7 +333,108 @@ constexpr const char* kNusTx = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
 
 NimBLEServer* bleServer = nullptr;
 NimBLECharacteristic* bleTx = nullptr;
+volatile int bleLinks = 0;            // connected centrals (PC host app, phone, ...), up to 3
 volatile bool bleLinked = false;
+
+// ---------------------------------------------------------------- BLE HID (keyboard + media keys)
+// The board is also a Bluetooth keyboard: phones and PCs pair with it once ("Just Works" bonding)
+// and then receive key / media-key reports. Report 1 = boot-style keyboard, report 2 = consumer.
+NimBLEHIDDevice* bleHid = nullptr;
+NimBLECharacteristic* bleKeyboardIn = nullptr;
+NimBLECharacteristic* bleConsumerIn = nullptr;
+constexpr int kMaxHidHosts = 3;
+volatile std::uint16_t hidHosts[kMaxHidHosts] = {0xFFFF, 0xFFFF, 0xFFFF};   // conn handles subscribed
+
+const std::uint8_t kHidReportMap[] = {
+    0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x85, 0x01,             // keyboard, report 1
+    0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
+    0x75, 0x01, 0x95, 0x08, 0x81, 0x02,                         //   8 modifier bits
+    0x95, 0x01, 0x75, 0x08, 0x81, 0x01,                         //   reserved byte
+    0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x91, 0x02,   // LED output
+    0x95, 0x01, 0x75, 0x03, 0x91, 0x01,
+    0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00,
+    0xC0,
+    0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01, 0x85, 0x02,             // consumer control, report 2
+    0x15, 0x00, 0x26, 0xFF, 0x03, 0x19, 0x00, 0x2A, 0xFF, 0x03, 0x75, 0x10, 0x95, 0x01, 0x81, 0x00,
+    0xC0,
+};
+
+int hidHostCount() {
+    int n = 0;
+    for (int i = 0; i < kMaxHidHosts; ++i) {
+        n += hidHosts[i] != 0xFFFF ? 1 : 0;
+    }
+    return n;
+}
+
+void hidHostSet(std::uint16_t conn, bool subscribed) {
+    for (int i = 0; i < kMaxHidHosts; ++i) {
+        if (hidHosts[i] == conn) {
+            if (!subscribed) {
+                hidHosts[i] = 0xFFFF;
+            }
+            return;
+        }
+    }
+    if (!subscribed) {
+        return;
+    }
+    for (int i = 0; i < kMaxHidHosts; ++i) {
+        if (hidHosts[i] == 0xFFFF) {
+            hidHosts[i] = conn;
+            return;
+        }
+    }
+}
+
+class HidReportCallbacks final : public NimBLECharacteristicCallbacks {
+    void onSubscribe(NimBLECharacteristic* characteristic, ble_gap_conn_desc* desc, std::uint16_t subValue) override {
+        (void)characteristic;
+        hidHostSet(desc->conn_handle, subValue != 0);
+    }
+};
+HidReportCallbacks hidReportCallbacks;
+
+// Key press + release on every connected HID host. usage = HID keyboard usage id.
+void bleKey(std::uint8_t modifiers, std::uint8_t usage) {
+    if (bleKeyboardIn == nullptr || hidHostCount() == 0) {
+        return;
+    }
+    std::uint8_t report[8] = {modifiers, 0, usage, 0, 0, 0, 0, 0};
+    bleKeyboardIn->setValue(report, sizeof(report));
+    bleKeyboardIn->notify();
+    delay(15);
+    std::uint8_t released[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    bleKeyboardIn->setValue(released, sizeof(released));
+    bleKeyboardIn->notify();
+}
+
+void bleConsumer(std::uint16_t usage) {
+    if (bleConsumerIn == nullptr || hidHostCount() == 0) {
+        return;
+    }
+    std::uint8_t report[2] = {static_cast<std::uint8_t>(usage & 0xFF), static_cast<std::uint8_t>(usage >> 8)};
+    bleConsumerIn->setValue(report, sizeof(report));
+    bleConsumerIn->notify();
+    delay(15);
+    std::uint8_t released[2] = {0, 0};
+    bleConsumerIn->setValue(released, sizeof(released));
+    bleConsumerIn->notify();
+}
+
+// HID usage ids (keyboard page 0x07, consumer page 0x0C) used by the BLE paths.
+constexpr std::uint8_t kModCtrl = 0x01;
+constexpr std::uint8_t kModShift = 0x02;
+constexpr std::uint8_t kModAlt = 0x04;
+constexpr std::uint8_t kModGui = 0x08;
+constexpr std::uint8_t kKeyC = 0x06, kKeyD = 0x07, kKeyL = 0x0F, kKeyS = 0x16, kKeyV = 0x19, kKeyZ = 0x1D;
+constexpr std::uint8_t kKeyEnter = 0x28, kKeyEsc = 0x29, kKeyTab = 0x2B;
+constexpr std::uint8_t kKeyDown = 0x51, kKeyUp = 0x52;
+constexpr std::uint16_t kUsePlayPause = 0xCD, kUseNext = 0xB5, kUsePrev = 0xB6, kUseMute = 0xE2;
+constexpr std::uint16_t kUseVolUp = 0xE9, kUseVolDown = 0xEA, kUseHome = 0x0223;
+
+// USB HID when the board is plugged into a PC that enumerated it, otherwise the BLE keyboard.
+bool usbHidReady();
 volatile bool bleOn = true;
 volatile bool bleRawMode = false;     // true: BLE <-> J_DBG UART bridge instead of commands
 volatile std::uint16_t blePayload = 20;
@@ -358,24 +449,31 @@ struct BleLine {
 };
 
 class BleServerCallbacks final : public NimBLEServerCallbacks {
-    void onConnect(NimBLEServer* server) override {
-        (void)server;
-        bleLinked = true;
-        blePayload = 20;
-    }
-
+    // Several centrals at once (PC host app + phone keyboard link): keep advertising until full.
     void onConnect(NimBLEServer* server, ble_gap_conn_desc* desc) override {
         (void)server;
+        bleLinks = bleLinks + 1;
+        bleLinked = true;
+        if (bleLinks == 1) {
+            blePayload = 20;          // until the MTU exchange; later links keep the current size
+        }
         bleConnHandle = desc->conn_handle;
         const std::string address = NimBLEAddress(desc->peer_ota_addr).toString();
         snprintf(blePeerAddress, sizeof(blePeerAddress), "%s", address.c_str());
+        if (bleOn && bleLinks < CONFIG_BT_NIMBLE_MAX_CONNECTIONS) {
+            NimBLEDevice::startAdvertising();
+        }
     }
 
-    void onDisconnect(NimBLEServer* server) override {
+    void onDisconnect(NimBLEServer* server, ble_gap_conn_desc* desc) override {
         (void)server;
-        bleLinked = false;
-        bleConnHandle = 0xFFFF;
-        blePeerAddress[0] = '\0';
+        hidHostSet(desc->conn_handle, false);
+        bleLinks = bleLinks > 0 ? bleLinks - 1 : 0;
+        bleLinked = bleLinks > 0;
+        if (desc->conn_handle == bleConnHandle) {
+            bleConnHandle = 0xFFFF;
+            blePeerAddress[0] = '\0';
+        }
         if (bleOn) {
             NimBLEDevice::startAdvertising();
         }
@@ -383,7 +481,9 @@ class BleServerCallbacks final : public NimBLEServerCallbacks {
 
     void onMTUChange(std::uint16_t mtu, ble_gap_conn_desc* desc) override {
         (void)desc;
-        blePayload = mtu > 23 ? mtu - 3 : 20;
+        const std::uint16_t payload = mtu > 23 ? mtu - 3 : 20;
+        const std::uint16_t current = blePayload;     // volatile: copy before std::min
+        blePayload = bleLinks <= 1 ? payload : std::min(current, payload);
     }
 };
 
@@ -457,6 +557,10 @@ void startBle() {
     bleQueue = xQueueCreate(12, sizeof(BleLine));
     NimBLEDevice::init(deviceName.c_str());
     NimBLEDevice::setMTU(247);
+    // Keyboards must bond: "Just Works" pairing (no PIN), LE secure connections. The Nordic UART
+    // characteristics stay unencrypted, so the PC host app still connects without pairing.
+    NimBLEDevice::setSecurityAuth(true, false, true);
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
     NimBLEServer* server = NimBLEDevice::createServer();
     bleServer = server;
     server->setCallbacks(&bleServerCallbacks);
@@ -466,9 +570,32 @@ void startBle() {
         kNusRx, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
     rx->setCallbacks(&bleRxCallbacks);
     service->start();
+
+    bleHid = new NimBLEHIDDevice(server);
+    bleKeyboardIn = bleHid->inputReport(1);
+    bleHid->outputReport(1);                       // keyboard LEDs; hosts write it, ignored
+    bleConsumerIn = bleHid->inputReport(2);
+    bleKeyboardIn->setCallbacks(&hidReportCallbacks);
+    bleConsumerIn->setCallbacks(&hidReportCallbacks);
+    bleHid->manufacturer()->setValue("SmartR");
+    bleHid->pnp(0x02, 0x303A, 0x8100, 0x0100);
+    bleHid->hidInfo(0x00, 0x01);
+    bleHid->reportMap(const_cast<std::uint8_t*>(kHidReportMap), sizeof(kHidReportMap));
+    bleHid->startServices();
+    bleHid->setBatteryLevel(100);
+
+    // Advertising: flags + keyboard appearance + HID service + name (24 of 31 bytes);
+    // scan response: the Nordic UART service the host app and the web page look for.
     NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
-    advertising->addServiceUUID(kNusService);
-    advertising->setScanResponse(true);
+    NimBLEAdvertisementData adv;
+    adv.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
+    adv.setAppearance(HID_KEYBOARD);
+    adv.setCompleteServices16({NimBLEUUID(static_cast<std::uint16_t>(0x1812))});
+    adv.setName(deviceName.c_str());
+    NimBLEAdvertisementData scan;
+    scan.setCompleteServices(NimBLEUUID(kNusService));
+    advertising->setAdvertisementData(adv);
+    advertising->setScanResponseData(scan);
     if (bleOn) {
         advertising->start();
     }
@@ -729,8 +856,10 @@ void setBleEnabled(bool enabled) {
         return;
     }
     advertising->stop();
-    if (bleLinked && bleServer != nullptr && bleConnHandle != 0xFFFF) {
-        bleServer->disconnect(bleConnHandle);
+    if (bleServer != nullptr) {
+        for (const std::uint16_t handle : bleServer->getPeerDevices()) {
+            bleServer->disconnect(handle);
+        }
     }
 }
 
@@ -774,8 +903,22 @@ void setBridgeBaud(std::uint32_t baud) {
     bridgeUart.updateBaudRate(baud);
 }
 
+String stateJson() {
+    return buildStateJson();
+}
+
 bool usbDeviceActive() {
     return usbDevice;
+}
+
+namespace {
+bool usbHidReady() {
+    return usbDevice && static_cast<bool>(USB);   // started and enumerated by a PC
+}
+}  // namespace
+
+bool usbHidConnected() {
+    return usbHidReady();
 }
 
 std::uint32_t bridgeRevision() {
@@ -814,10 +957,18 @@ const char* knobModeName(KnobMode mode) {
 }
 
 void knobRotate(KnobMode mode, int steps) {
-    if (!usbDevice) {
+    const int count = steps < 0 ? -steps : steps;
+    if (!usbHidReady()) {
+        // Bluetooth keyboard: no mouse report, so "scroll" uses the arrow keys.
+        for (int i = 0; i < count; ++i) {
+            switch (mode) {
+                case KnobMode::Volume: bleConsumer(steps > 0 ? kUseVolUp : kUseVolDown); break;
+                case KnobMode::Media: bleConsumer(steps > 0 ? kUseNext : kUsePrev); break;
+                default: bleKey(0, steps > 0 ? kKeyDown : kKeyUp); break;
+            }
+        }
         return;
     }
-    const int count = steps < 0 ? -steps : steps;
     for (int i = 0; i < count; ++i) {
         switch (mode) {
             case KnobMode::Volume:
@@ -843,7 +994,12 @@ void knobRotate(KnobMode mode, int steps) {
 }
 
 void knobClick(KnobMode mode) {
-    if (!usbDevice) {
+    if (!usbHidReady()) {
+        switch (mode) {
+            case KnobMode::Volume: bleConsumer(kUseMute); break;
+            case KnobMode::Media: bleConsumer(kUsePlayPause); break;
+            default: bleKey(0, kKeyEnter); break;
+        }
         return;
     }
     switch (mode) {
@@ -885,10 +1041,88 @@ void consumerKey(std::uint16_t usage) {
     consumerControl.release();
 }
 
+// Same shortcuts through the Bluetooth keyboard (HID usage ids instead of Arduino key codes).
+void sendActionBle(Action action) {
+    switch (action) {
+        case Action::Screenshot: bleKey(kModGui | kModShift, kKeyS); break;
+        case Action::Lock: bleKey(kModGui, kKeyL); break;
+        case Action::ShowDesktop: bleKey(kModGui, kKeyD); break;
+        case Action::TaskManager: bleKey(kModCtrl | kModShift, kKeyEsc); break;
+        case Action::Copy: bleKey(kModCtrl, kKeyC); break;
+        case Action::Paste: bleKey(kModCtrl, kKeyV); break;
+        case Action::Undo: bleKey(kModCtrl, kKeyZ); break;
+        case Action::SwitchWindow: bleKey(kModAlt, kKeyTab); break;
+        case Action::Mute: bleConsumer(kUseMute); break;
+        case Action::PlayPause: bleConsumer(kUsePlayPause); break;
+        case Action::PrevTrack: bleConsumer(kUsePrev); break;
+        case Action::NextTrack: bleConsumer(kUseNext); break;
+        case Action::FeishuMic: bleKey(kModCtrl | kModShift, kKeyD); break;
+        case Action::FeishuCamera: bleKey(kModCtrl | kModShift, kKeyV); break;
+        case Action::VolumeUp: bleConsumer(kUseVolUp); break;
+        case Action::VolumeDown: bleConsumer(kUseVolDown); break;
+        default: break;
+    }
+}
+
 }  // namespace
 
+bool bleKeyboardActive() {
+    return hidHostCount() > 0;
+}
+
+int bleKeyboardHosts() {
+    return hidHostCount();
+}
+
+int bleBondCount() {
+    return NimBLEDevice::getNumBonds();
+}
+
+void clearBlePairings() {
+    if (bleServer != nullptr) {
+        for (const std::uint16_t handle : bleServer->getPeerDevices()) {
+            bleServer->disconnect(handle);
+        }
+    }
+    NimBLEDevice::deleteAllBonds();
+}
+
+const char* remoteName(Remote remote) {
+    switch (remote) {
+        case Remote::VolumeUp: return "VOLUP";
+        case Remote::VolumeDown: return "VOLDOWN";
+        case Remote::PlayPause: return "PLAY";
+        case Remote::Next: return "NEXT";
+        case Remote::Prev: return "PREV";
+        case Remote::Shutter: return "SHUTTER";
+        case Remote::Mute: return "MUTE";
+        case Remote::PageUp: return "UP";
+        case Remote::PageDown: return "DOWN";
+        case Remote::Home: return "HOME";
+        default: return "?";
+    }
+}
+
+// Phone remote: always the Bluetooth keyboard. iOS camera: volume up = shutter.
+void sendRemote(Remote remote) {
+    switch (remote) {
+        case Remote::VolumeUp: bleConsumer(kUseVolUp); break;
+        case Remote::VolumeDown: bleConsumer(kUseVolDown); break;
+        case Remote::PlayPause: bleConsumer(kUsePlayPause); break;
+        case Remote::Next: bleConsumer(kUseNext); break;
+        case Remote::Prev: bleConsumer(kUsePrev); break;
+        case Remote::Shutter: bleConsumer(kUseVolUp); break;
+        case Remote::Mute: bleConsumer(kUseMute); break;
+        case Remote::PageUp: bleKey(0, kKeyUp); break;
+        case Remote::PageDown: bleKey(0, kKeyDown); break;
+        case Remote::Home: bleConsumer(kUseHome); break;
+        default: break;
+    }
+}
+
 void sendAction(Action action) {
-    if (!usbDevice) {
+    if (!usbHidReady()) {
+        sendActionBle(action);    // not on a PC's USB: the Bluetooth keyboard (if a host is paired)
         return;
     }
     switch (action) {

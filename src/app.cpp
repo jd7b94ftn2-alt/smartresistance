@@ -333,8 +333,9 @@ const char* const kHelpText =
     "MSGNEW <id> <app> <w> <h> | MSGDAT <id> <off> <b64> | MSGEND <id> | MSG? | MSGREAD | MSGCLR\n"
     "IMGNEW <slot> <w> <h> | IMGDAT <slot> <off> <b64> | IMGEND <slot> | IMGCLR <slot>\n"
     "SYS <cpu> <ram> <down> <up> | PLAY <0|1> | CI <0..3> [HH:MM] | MACRO <0..5> <action> | MACRO?\n"
-    "USBMODE <PC|PBANK> | USBMODE? | PB? | PBLOG? | SHOT [row] [rows]\n"
-    "PAGE <0..16> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
+    "USBMODE <PC|PBANK> | USBMODE? | PB? | PBLOG? | SHOT [row] [rows] | STATE?\n"
+    "HID? | REMOTE <VOLUP|VOLDOWN|PLAY|NEXT|PREV|SHUTTER|MUTE|UP|DOWN|HOME> | UNPAIR\n"
+    "PAGE <0..17> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
 
 String handleCalibration(String* tokens, int count) {
     Calibration& cal = controller.calibration();
@@ -971,7 +972,7 @@ String handleCommand(const String& rawLine) {
 
     if (cmd == "PAGE") {
         if (count < 2 || !parseNumber(tokens[1], a) || a < 0 || a >= static_cast<int>(ui::Page::Count)) {
-            return "ERR PAGE <0..16>";
+            return "ERR PAGE <0..17>";
         }
         ui::setPage(static_cast<ui::Page>(static_cast<int>(a)));
         return "OK";
@@ -1030,6 +1031,31 @@ String handleCommand(const String& rawLine) {
     }
     if (cmd == "PB?") {
         return pbank::statusLine();
+    }
+    if (cmd == "HID?") {
+        return String("HID HOSTS=") + comm::bleKeyboardHosts() + " BONDS=" + comm::bleBondCount();
+    }
+    if (cmd == "REMOTE") {
+        String name = count >= 2 ? tokens[1] : String("");
+        name.toUpperCase();
+        for (int i = 0; i < static_cast<int>(comm::Remote::Count); ++i) {
+            const comm::Remote remote = static_cast<comm::Remote>(i);
+            if (name == comm::remoteName(remote)) {
+                if (!comm::bleKeyboardActive()) {
+                    return "ERR no paired phone connected";
+                }
+                comm::sendRemote(remote);
+                return "OK";
+            }
+        }
+        return "ERR REMOTE <VOLUP|VOLDOWN|PLAY|NEXT|PREV|SHUTTER|MUTE|UP|DOWN|HOME>";
+    }
+    if (cmd == "UNPAIR") {
+        comm::clearBlePairings();
+        return "OK pairings cleared";
+    }
+    if (cmd == "STATE?") {
+        return comm::stateJson();
     }
     if (cmd == "SHOT") {
         const int first = count >= 2 ? tokens[1].toInt() : 0;

@@ -24,6 +24,7 @@ enum class Page : std::uint8_t {
     Pomodoro,
     NtcPick,
     PowerBank,
+    Remote,
     Count,
 };
 
