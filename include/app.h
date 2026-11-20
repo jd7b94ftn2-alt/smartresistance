@@ -9,7 +9,7 @@
 // BLE, TCP, HTTP). All of it runs on the Arduino loop task.
 namespace app {
 
-constexpr const char* kFirmwareVersion = "1.6.2";
+constexpr const char* kFirmwareVersion = "1.6.3";
 
 // Relay indices for the raw/test interface: 0..35 = shift-chain bits (hardware/relay_map.csv),
 // 36..39 = spare driver outputs, 40 = K_OUT.
@@ -100,6 +100,22 @@ float boardTempC();
 int tempLogCount();
 float tempLogAt(int index);                    // 0 = oldest
 void clearTempLog();
+
+// ---- resources (资源 page, MEM?, CLEAN) ----
+struct Resources {
+    std::uint32_t heapFree = 0, heapTotal = 0, heapMin = 0, heapBlock = 0;   // internal RAM, bytes
+    std::uint32_t psramFree = 0, psramTotal = 0, psramMin = 0;
+    std::uint32_t appUsed = 0, appTotal = 0;                                // firmware image / app0 slot
+    std::uint32_t nvsUsed = 0, nvsTotal = 0;                                // NVS entries (32 B each)
+    std::uint32_t loopHz = 0;
+    std::uint32_t uptimeS = 0;
+};
+Resources resources();          // the first call measures the firmware image (about 0.2 s)
+struct Cleanup {
+    std::uint32_t freedBytes = 0;   // free heap after - before (internal + PSRAM)
+    int messages = 0;               // read message cards dropped
+};
+Cleanup cleanup();
 
 // ---- commands ----
 // Executes one text command line and returns the reply (may span several lines, no trailing

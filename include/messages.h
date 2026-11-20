@@ -50,4 +50,10 @@ void clear();
 bool addCard(App app, int width, int height, const std::uint8_t* pixels);
 std::uint32_t revision();              // changes whenever a card is added or removed
 
+// Memory clean-up (资源 page / CLEAN): buffers that hold nothing still unread — read cards, ring slots
+// no longer listed, cleared image slots and the idle receive buffer. Unread cards and shown images stay.
+int readCount();                       // cards that are listed but already read
+std::size_t reclaimableBytes();
+int releaseRead();                     // frees those buffers, drops read cards from the list; returns cards dropped
+
 }  // namespace msg

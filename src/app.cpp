@@ -340,9 +340,9 @@ const char* const kHelpText =
     "IMGNEW <slot> <w> <h> | IMGDAT <slot> <off> <b64> | IMGEND <slot> | IMGCLR <slot>\n"
     "SYS <cpu> <ram> <down> <up> | PLAY <0|1> | CI <0..3> [HH:MM] | MACRO <0..5> <action> | MACRO?\n"
     "USBMODE <PC|PBANK> | USBMODE? | PB? | PBLOG? | SHOT [row] [rows] | STATE?\n"
-    "HID? | ANCS? | MEM? | REMOTE <VOLUP|VOLDOWN|PLAY|NEXT|PREV|SHUTTER|MUTE|UP|DOWN|HOME> | UNPAIR\n"
+    "HID? | ANCS? | MEM? | CLEAN | REMOTE <VOLUP|VOLDOWN|PLAY|NEXT|PREV|SHUTTER|MUTE|UP|DOWN|HOME> | UNPAIR\n"
     "GAME? | GAME <NEW|LEFT|RIGHT|ROT|DROP|PAUSE|RESUME>\n"
-    "PAGE <0..18> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
+    "PAGE <0..19> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
 
 String handleCalibration(String* tokens, int count) {
     Calibration& cal = controller.calibration();
@@ -417,6 +417,14 @@ String kib(std::size_t bytes) {
     return String(static_cast<unsigned>((bytes + 512) / 1024)) + "K";
 }
 
+std::uint32_t appImageBytes() {
+    static std::uint32_t bytes = 0;
+    if (bytes == 0) {
+        bytes = ESP.getSketchSize();           // verifies the whole image (~0.2 s), so only once
+    }
+    return bytes;
+}
+
 void appendPartitions(String& out, esp_partition_type_t type) {
     for (esp_partition_iterator_t it = esp_partition_find(type, ESP_PARTITION_SUBTYPE_ANY, nullptr); it != nullptr;
          it = esp_partition_next(it)) {
@@ -436,12 +444,8 @@ String memoryReport() {
     // HEAP = internal RAM (free/total), PSRAM = external 8 MB; MIN = lowest free since boot, BLOCK = largest free piece
     String out = String("MEM ") + heapLine("HEAP", MALLOC_CAP_INTERNAL) + " " + heapLine("PSRAM", MALLOC_CAP_SPIRAM);
 
-    static std::uint32_t appBytes = 0;
-    if (appBytes == 0) {
-        appBytes = ESP.getSketchSize();        // verifies the whole image (~0.2 s), so only once
-    }
     const esp_partition_t* running = esp_ota_get_running_partition();
-    out += String("\nAPP=") + kib(appBytes) + "/" + kib(running ? running->size : 0);
+    out += String("\nAPP=") + kib(appImageBytes()) + "/" + kib(running ? running->size : 0);
     nvs_stats_t nvs = {};
     if (nvs_get_stats(nullptr, &nvs) == ESP_OK) {
         out += String(" NVS=") + static_cast<unsigned>(nvs.used_entries) + "/" + static_cast<unsigned>(nvs.total_entries)
@@ -572,6 +576,41 @@ void loop() {
 
 Settings& settings() {
     return config;
+}
+
+Resources resources() {
+    Resources r;
+    multi_heap_info_t info = {};
+    heap_caps_get_info(&info, MALLOC_CAP_INTERNAL);
+    r.heapFree = info.total_free_bytes;
+    r.heapTotal = info.total_free_bytes + info.total_allocated_bytes;
+    r.heapMin = info.minimum_free_bytes;
+    r.heapBlock = info.largest_free_block;
+    info = {};
+    heap_caps_get_info(&info, MALLOC_CAP_SPIRAM);
+    r.psramFree = info.total_free_bytes;
+    r.psramTotal = info.total_free_bytes + info.total_allocated_bytes;
+    r.psramMin = info.minimum_free_bytes;
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    r.appUsed = appImageBytes();
+    r.appTotal = running ? running->size : 0;
+    nvs_stats_t nvs = {};
+    if (nvs_get_stats(nullptr, &nvs) == ESP_OK) {
+        r.nvsUsed = nvs.used_entries;
+        r.nvsTotal = nvs.total_entries;
+    }
+    r.loopHz = loopRateHz;
+    r.uptimeS = millis() / 1000UL;
+    return r;
+}
+
+Cleanup cleanup() {
+    Cleanup result;
+    const std::size_t before = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    result.messages = msg::releaseRead();
+    const std::size_t after = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    result.freedBytes = after > before ? static_cast<std::uint32_t>(after - before) : 0;
+    return result;
 }
 
 void scheduleReboot(std::uint32_t delayMs) {
@@ -1087,7 +1126,7 @@ String handleCommand(const String& rawLine) {
 
     if (cmd == "PAGE") {
         if (count < 2 || !parseNumber(tokens[1], a) || a < 0 || a >= static_cast<int>(ui::Page::Count)) {
-            return "ERR PAGE <0..18>";
+            return "ERR PAGE <0..19>";
         }
         ui::setPage(static_cast<ui::Page>(static_cast<int>(a)));
         return "OK";
@@ -1152,6 +1191,10 @@ String handleCommand(const String& rawLine) {
     }
     if (cmd == "MEM?") {
         return memoryReport();
+    }
+    if (cmd == "CLEAN") {
+        const Cleanup done = cleanup();
+        return String("OK FREED=") + done.freedBytes + " MSGS=" + done.messages;
     }
     if (cmd == "GAME?" || (cmd == "GAME" && count >= 2)) {
         // 色环方块 remote control (tests / screenshots): GAME NEW|LEFT|RIGHT|ROT|DROP|PAUSE|RESUME

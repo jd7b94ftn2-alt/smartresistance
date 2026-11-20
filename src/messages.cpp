@@ -289,4 +289,63 @@ std::uint32_t revision() {
     return rev;
 }
 
+namespace {
+
+// Slot i holds one of the newest `unreadCount` cards (those are kept by a clean-up).
+bool holdsUnread(int i) {
+    const int age = (newest - i + kMaxMessages) % kMaxMessages;
+    return age < unreadCount && age < stored;
+}
+
+}  // namespace
+
+int readCount() {
+    return stored - unreadCount;
+}
+
+std::size_t reclaimableBytes() {
+    std::size_t bytes = 0;
+    for (int i = 0; i < kMaxMessages; ++i) {
+        if (slots[i].data != nullptr && !holdsUnread(i)) {
+            bytes += kSlotBytes;
+        }
+    }
+    for (int s = 0; s < kImageSlots; ++s) {
+        if (images[s].data != nullptr && !imageValid[s]) {
+            bytes += kSlotBytes;
+        }
+    }
+    if (pending != nullptr && !pendingActive) {
+        bytes += kSlotBytes;
+    }
+    return bytes;
+}
+
+int releaseRead() {
+    const int dropped = stored - unreadCount;
+    for (int i = 0; i < kMaxMessages; ++i) {
+        if (slots[i].data != nullptr && !holdsUnread(i)) {
+            free(slots[i].data);
+            slots[i].data = nullptr;
+            slots[i].info = Message();
+        }
+    }
+    for (int s = 0; s < kImageSlots; ++s) {
+        if (images[s].data != nullptr && !imageValid[s]) {
+            free(images[s].data);
+            images[s].data = nullptr;
+            images[s].info = Message();
+        }
+    }
+    if (pending != nullptr && !pendingActive) {
+        free(pending);                 // startPending() allocates it again on the next card
+        pending = nullptr;
+    }
+    stored = unreadCount;
+    if (dropped > 0) {
+        ++rev;
+    }
+    return dropped;
+}
+
 }  // namespace msg

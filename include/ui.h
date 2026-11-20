@@ -26,6 +26,7 @@ enum class Page : std::uint8_t {
     PowerBank,
     Remote,
     Game,
+    System,
     Count,
 };
 

@@ -438,6 +438,7 @@ const HomeEntry kHome[] = {
     {"蓝牙", "BLE", Page::Bluetooth, rgb(0x6366F1), 2},
     {"旋钮", "Knob", Page::Knob, rgb(0xA855F7), 3},
     {"方块", "Blocks", Page::Game, rgb(0xB45309), 15},
+    {"资源", "Sys", Page::System, rgb(0x0E7490), 16},
     {"设置", "Setup", Page::About, rgb(0x64748B), 8},
 };
 constexpr int kHomeCount = sizeof(kHome) / sizeof(kHome[0]);
@@ -477,6 +478,7 @@ const char* pageTitle(Page page) {
         case Page::PowerBank: return tr("充电宝", "Power bank");
         case Page::Remote: return tr("手机遥控", "Phone remote");
         case Page::Game: return tr("色环方块", "Band Blocks");
+        case Page::System: return tr("系统资源", "System");
         default: return "";
     }
 }
@@ -728,6 +730,15 @@ void homeIcon(int index, int cx, int cy, std::uint16_t c, std::uint16_t bg) {
             gfx->fillRoundRect(cx + 4, cy + 3, 6, 6, 1, c);
             gfx->fillRoundRect(cx + 4, cy - 4, 6, 6, 1, c);
             gfx->fillRoundRect(cx - 7, cy - 10, 6, 6, 1, c);
+            break;
+        case 16:  // memory chip: body, die, pins above and below
+            gfx->drawRoundRect(cx - 8, cy - 6, 17, 13, 2, c);
+            gfx->drawRoundRect(cx - 7, cy - 5, 15, 11, 2, c);
+            gfx->fillRect(cx - 3, cy - 2, 7, 5, c);
+            for (int k = 0; k < 4; ++k) {
+                gfx->fillRect(cx - 6 + k * 4, cy - 10, 2, 3, c);
+                gfx->fillRect(cx - 6 + k * 4, cy + 8, 2, 3, c);
+            }
             break;
         default:
             break;
@@ -2517,6 +2528,99 @@ void gamePress() {
     }
 }
 
+// ------------------------------------------------------------ 系统资源 page (memory, storage, clean-up)
+// Four usage bars, uptime / loop rate, and "清理": frees read message cards and idle bitmap buffers
+// (the only memory the firmware can give back; everything else is allocated once at boot).
+const Rect kSysClean = {214, 176, 98, 58};
+std::uint32_t sysStatsMs = 0;
+bool sysForce = false;
+String sysResult;                     // "已释放 …" after a clean-up, shown for a few seconds
+std::uint32_t sysResultUntil = 0;
+
+String bytesShort(std::uint32_t bytes) {
+    if (bytes < 1024) {
+        return String(bytes) + "B";
+    }
+    if (bytes < 1024UL * 1024UL) {
+        return String((bytes + 512) / 1024) + "K";
+    }
+    return String(bytes / 1048576.0f, 2) + "M";
+}
+
+void usageRow(int y, const char* name, std::uint32_t free, std::uint32_t total, const String& right) {
+    text(name, 14, y, Font::Small, kFg, kCard, 0, TL_DATUM, 2, false);
+    text(right, 306, y, Font::Small, kDim, kCard, 0, TR_DATUM, 2, false);
+    const int w = 292;
+    const float used = total > 0 ? 1.0f - static_cast<float>(free) / total : 0.0f;
+    const float freeShare = 1.0f - used;
+    const std::uint16_t color = freeShare >= 0.3f ? kGood : (freeShare >= 0.15f ? kWarn : kBad);
+    gfx->fillRoundRect(14, y + 22, w, 7, 3, kButton);
+    const int fill = std::max(4, static_cast<int>(w * used + 0.5f));
+    gfx->fillRoundRect(14, y + 22, std::min(w, fill), 7, 3, color);
+}
+
+void sysClean() {
+    const app::Cleanup done = app::cleanup();
+    if (done.freedBytes == 0) {
+        sysResult = tr("已经很干净了", "Nothing to free");
+    } else {
+        sysResult = String(tr("已释放 ", "Freed ")) + bytesShort(done.freedBytes);
+        if (done.messages > 0) {
+            sysResult += String(tr(" · 已读消息 ", " · read msgs ")) + done.messages;
+        }
+    }
+    sysResultUntil = millis() + 5000;
+    sysForce = true;
+}
+
+void renderSystem() {
+    const std::uint32_t now = millis();
+    const bool fresh = changed(0, "", 1);          // first frame after the page was (re)drawn
+    if (sysResult.length() > 0 && static_cast<std::int32_t>(now - sysResultUntil) >= 0) {
+        sysResult = "";
+        sysForce = true;
+    }
+    if (!fresh && !sysForce && now - sysStatsMs < 1000) {
+        return;
+    }
+    sysForce = false;
+    sysStatsMs = now;
+    const app::Resources r = app::resources();
+
+    gfx->fillRect(0, kBar + 1, kWidth, kHeight - kBar - 1, kBg);
+    panel(6, 30, 308, 140, 10, kCard);
+    const String slash = " / ";
+    const String left = tr("剩 ", "free ");
+    usageRow(34, tr("内部 RAM", "RAM"), r.heapFree, r.heapTotal, left + bytesShort(r.heapFree) + slash + bytesShort(r.heapTotal));
+    usageRow(68, "PSRAM", r.psramFree, r.psramTotal, left + bytesShort(r.psramFree) + slash + bytesShort(r.psramTotal));
+    usageRow(102, tr("固件空间", "Firmware"), r.appTotal - std::min(r.appTotal, r.appUsed), r.appTotal,
+        left + bytesShort(r.appTotal - std::min(r.appTotal, r.appUsed)) + slash + bytesShort(r.appTotal));
+    usageRow(136, tr("设置存储", "Settings"), r.nvsTotal - std::min(r.nvsTotal, r.nvsUsed), r.nvsTotal,
+        left + String(r.nvsTotal - std::min(r.nvsTotal, r.nvsUsed)) + slash + String(r.nvsTotal) + tr(" 条", ""));
+
+    const std::uint32_t up = r.uptimeS;
+    char upText[16];
+    snprintf(upText, sizeof(upText), "%lu:%02lu:%02lu", static_cast<unsigned long>(up / 3600),
+        static_cast<unsigned long>(up / 60 % 60), static_cast<unsigned long>(up % 60));
+    text(String(tr("运行 ", "Up ")) + upText + tr(" · 循环 ", " · loop ") + r.loopHz + "/s", 12, 176, Font::Small, kDim,
+        kBg, 0, TL_DATUM, 2, false);
+    text(String(tr("RAM 开机以来最低剩 ", "RAM low since boot ")) + bytesShort(r.heapMin), 12, 196, Font::Small, kDim,
+        kBg, 0, TL_DATUM, 2, false);
+    if (sysResult.length() > 0) {
+        text(sysResult, 12, 216, Font::Small, kGood, kBg, 0, TL_DATUM, 2, false);
+    } else {
+        const std::size_t spare = msg::reclaimableBytes();
+        String line = String(tr("可清理 ", "Can free ")) + bytesShort(static_cast<std::uint32_t>(spare));
+        if (msg::readCount() > 0) {
+            line += String(tr(" · 已读消息 ", " · read ")) + msg::readCount();
+        }
+        text(line, 12, 216, Font::Small, spare > 0 ? kFg : kDim, kBg, 0, TL_DATUM, 2, false);
+    }
+    panel(kSysClean.x, kSysClean.y, kSysClean.w, kSysClean.h, 12, kAccent);
+    text(tr("清理", "Clean"), kSysClean.x + kSysClean.w / 2, kSysClean.y + kSysClean.h / 2 + 1, Font::Large, kWhite, kAccent,
+        0, MC_DATUM, 2, false);
+}
+
 // ------------------------------------------------------------ page switching / dispatch
 void clearContent() {
     useFont(Font::Builtin);
@@ -2608,6 +2712,7 @@ void renderPage() {
         case Page::PowerBank: renderPowerBank(); break;
         case Page::Remote: renderRemote(); break;
         case Page::Game: renderGame(); break;
+        case Page::System: renderSystem(); break;
         default: break;
     }
 }
@@ -2697,6 +2802,13 @@ Tap onTouch(int x, int y) {
 
         case Page::Game:
             return gameTouch(x, y);
+
+        case Page::System:
+            if (kSysClean.contains(x, y)) {
+                sysClean();
+                return Tap::Done;
+            }
+            break;
 
         case Page::Menu:
             for (int i = 0; i < kHomeCount; ++i) {
@@ -3095,6 +3207,9 @@ void onShortPress() {
             break;
         case Page::Game:
             gamePress();
+            break;
+        case Page::System:
+            sysClean();
             break;
         case Page::TouchCal:
             config.touchSkipped = true;
