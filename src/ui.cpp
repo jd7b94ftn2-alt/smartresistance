@@ -749,7 +749,7 @@ void renderNtc() {
     button(0, kNtcType, ohmsShort(app::ntcR25()) + "  ·  B" + String(static_cast<long>(std::round(app::ntcBeta())))
         + tr("   选规格 ›", "   change ›"), Style::Normal, Font::Large, ntcField == 0);
     const bool user = app::settings().ntcPreset == app::ntcTypeCount() - 1;
-    label(1, 14, 70, 296, String(user ? tr("自定义规格", "Custom") : tr("常用型号", "Preset")) + "   R25 "
+    label(1, 14, 66, 296, String(user ? tr("自定义规格", "Custom") : tr("常用型号", "Preset")) + "   R25 "
         + String(app::ntcR25(), 0) + " Ω    B " + String(app::ntcBeta(), 0), Font::Small, kDim);
     bigNumber(2, 238, 87, 224, String(ntcEditTemp, 1), kFg, TR_DATUM, kCard);
     const char* names[4] = {"-1", "-0.1", "+0.1", "+1"};
@@ -1765,7 +1765,7 @@ void toggleLanguage() {
 
 // ------------------------------------------------------------ touch calibration page
 void drawCalibrationTarget() {
-    gfx->fillScreen(kBg);
+    gfx->fillRect(0, 0, kWidth, kHeight, kBg);   // not fillScreen: a sprite keeps the 240x320 default size there
     const int x = kCalX[calStep];
     const int y = kCalY[calStep];
     gfx->drawFastHLine(x - 15, y, 31, kFg);
@@ -1912,7 +1912,7 @@ void serviceCalibration(std::uint32_t now) {
     if (++calStep < 4) {
         return;
     }
-    gfx->fillScreen(kBg);
+    gfx->fillRect(0, 0, kWidth, kHeight, kBg);   // not fillScreen: a sprite keeps the 240x320 default size there
     if (finishCalibration()) {
         text(tr("校准完成", "Calibration done"), kWidth / 2, kHeight / 2, Font::Large, kGood, kBg, 0, MC_DATUM, 2);
         delay(800);
@@ -2124,7 +2124,7 @@ void renderPowerBank() {
 // ------------------------------------------------------------ page switching / dispatch
 void clearContent() {
     useFont(Font::Builtin);
-    gfx->fillScreen(kBg);
+    gfx->fillRect(0, 0, kWidth, kHeight, kBg);   // not fillScreen: a sprite keeps the 240x320 default size there
     resetSlots();
     if (currentPage == Page::TouchCal) {
         return;
