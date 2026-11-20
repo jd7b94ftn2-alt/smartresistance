@@ -18,6 +18,7 @@
 #include "board_pins.h"
 #include "comm.h"
 #include "desk.h"
+#include "game.h"
 #include "messages.h"
 #include "pbank.h"
 #include "relay_backend.h"
@@ -340,7 +341,8 @@ const char* const kHelpText =
     "SYS <cpu> <ram> <down> <up> | PLAY <0|1> | CI <0..3> [HH:MM] | MACRO <0..5> <action> | MACRO?\n"
     "USBMODE <PC|PBANK> | USBMODE? | PB? | PBLOG? | SHOT [row] [rows] | STATE?\n"
     "HID? | ANCS? | MEM? | REMOTE <VOLUP|VOLDOWN|PLAY|NEXT|PREV|SHUTTER|MUTE|UP|DOWN|HOME> | UNPAIR\n"
-    "PAGE <0..17> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
+    "GAME? | GAME <NEW|LEFT|RIGHT|ROT|DROP|PAUSE|RESUME>\n"
+    "PAGE <0..18> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
 
 String handleCalibration(String* tokens, int count) {
     Calibration& cal = controller.calibration();
@@ -1080,7 +1082,7 @@ String handleCommand(const String& rawLine) {
 
     if (cmd == "PAGE") {
         if (count < 2 || !parseNumber(tokens[1], a) || a < 0 || a >= static_cast<int>(ui::Page::Count)) {
-            return "ERR PAGE <0..17>";
+            return "ERR PAGE <0..18>";
         }
         ui::setPage(static_cast<ui::Page>(static_cast<int>(a)));
         return "OK";
@@ -1145,6 +1147,34 @@ String handleCommand(const String& rawLine) {
     }
     if (cmd == "MEM?") {
         return memoryReport();
+    }
+    if (cmd == "GAME?" || (cmd == "GAME" && count >= 2)) {
+        // 色环方块 remote control (tests / screenshots): GAME NEW|LEFT|RIGHT|ROT|DROP|PAUSE|RESUME
+        const std::uint32_t now = millis();
+        if (cmd == "GAME") {
+            String action = tokens[1];
+            action.toUpperCase();
+            if (action == "NEW") {
+                game::newGame(now);
+            } else if (action == "LEFT" || action == "RIGHT") {
+                game::move(action == "LEFT" ? -1 : 1, now);
+            } else if (action == "ROT") {
+                game::rotate(now);
+            } else if (action == "DROP") {
+                game::drop(now);
+            } else if (action == "PAUSE") {
+                game::pause(now);
+            } else if (action == "RESUME") {
+                game::resume(now);
+            } else {
+                return "ERR GAME NEW|LEFT|RIGHT|ROT|DROP|PAUSE|RESUME";
+            }
+        }
+        game::begin();
+        static const char* const kStates[] = {"READY", "PLAYING", "PAUSED", "CLEARING", "OVER"};
+        return String("GAME STATE=") + kStates[static_cast<int>(game::state())] + " SCORE=" + game::score()
+            + " BEST=" + game::best() + " LINES=" + game::lines() + " LEVEL=" + game::level()
+            + " NEXT=" + game::nextType();
     }
     if (cmd == "HID?") {
         return String("HID HOSTS=") + comm::bleKeyboardHosts() + " BONDS=" + comm::bleBondCount();

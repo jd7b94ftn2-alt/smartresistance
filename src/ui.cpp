@@ -16,6 +16,7 @@
 #include "desk.h"
 #include "font_zh16.h"
 #include "font_zh24.h"
+#include "game.h"
 #include "messages.h"
 #include "pbank.h"
 
@@ -256,6 +257,13 @@ int takeEncoderSteps() {
 
 enum class Press : std::uint8_t { None, Short, Long };
 
+// Set when the knob is turned while held down (push-and-turn); that press then fires neither Short nor Long.
+bool pressUsed = false;
+
+bool knobHeld() {
+    return digitalRead(board::kEncoderSwitch) == LOW;
+}
+
 Press pollButton() {
     static bool stable = false;
     static bool lastRaw = false;
@@ -264,7 +272,7 @@ Press pollButton() {
     static std::uint32_t downMs = 0;
 
     const std::uint32_t now = millis();
-    const bool raw = digitalRead(board::kEncoderSwitch) == LOW;
+    const bool raw = knobHeld();
     if (raw != lastRaw) {
         lastRaw = raw;
         changeMs = now;
@@ -274,11 +282,12 @@ Press pollButton() {
         if (stable) {
             downMs = now;
             longFired = false;
-        } else if (!longFired) {
+            pressUsed = false;
+        } else if (!longFired && !pressUsed) {
             return Press::Short;
         }
     }
-    if (stable && !longFired && now - downMs >= kLongPressMs) {
+    if (stable && !longFired && !pressUsed && now - downMs >= kLongPressMs) {
         longFired = true;
         return Press::Long;
     }
@@ -391,23 +400,24 @@ struct HomeEntry {
     std::uint8_t icon;         // homeIcon() index
 };
 
-// 5 x 3 grid: instrument row, desk-assistant row, connectivity row.
+// 6 x 3 grid: instrument row, desk-assistant row, connectivity / fun row.
 const HomeEntry kHome[] = {
     {"电阻", "Ohm", Page::Resistor, rgb(0x2A9DF4), 0},
     {"NTC", "NTC", Page::Ntc, rgb(0x22C55E), 1},
     {"继电器", "Relay", Page::RelayTest, rgb(0xEF4444), 7},
     {"曲线", "Log", Page::TempLog, rgb(0x14B8A6), 5},
     {"充电宝", "PBank", Page::PowerBank, rgb(0x84CC16), 13},
+    {"串口", "UART", Page::Serial, rgb(0xF97316), 4},
     {"桌面", "Desk", Page::Desk, rgb(0x0EA5E9), 9},
     {"快捷键", "Keys", Page::Macro, rgb(0xF59E0B), 10},
     {"计时", "Timer", Page::Pomodoro, rgb(0xE11D48), 11},
     {"时钟", "Clock", Page::Info, rgb(0xEC4899), 6},
     {"消息", "Msgs", Page::Messages, rgb(0x06B6D4), 12},
+    {"遥控", "Phone", Page::Remote, rgb(0x10B981), 14},
     {"蓝牙", "BLE", Page::Bluetooth, rgb(0x6366F1), 2},
     {"旋钮", "Knob", Page::Knob, rgb(0xA855F7), 3},
-    {"串口", "UART", Page::Serial, rgb(0xF97316), 4},
+    {"方块", "Blocks", Page::Game, rgb(0xB45309), 15},
     {"设置", "Setup", Page::About, rgb(0x64748B), 8},
-    {"遥控", "Remote", Page::Remote, rgb(0x10B981), 14},
 };
 constexpr int kHomeCount = sizeof(kHome) / sizeof(kHome[0]);
 
@@ -445,6 +455,7 @@ const char* pageTitle(Page page) {
         case Page::NtcPick: return tr("NTC 规格", "NTC type");
         case Page::PowerBank: return tr("充电宝", "Power bank");
         case Page::Remote: return tr("手机遥控", "Phone remote");
+        case Page::Game: return tr("色环方块", "Band Blocks");
         default: return "";
     }
 }
@@ -589,7 +600,7 @@ int digitX(int i) {
 const Rect kOutputButton = {10, 196, 300, 38};
 
 Rect homeTile(int i) {
-    return Rect{static_cast<std::int16_t>(2 + (i % 5) * 64), static_cast<std::int16_t>(30 + (i / 5) * 70), 60, 66};
+    return Rect{static_cast<std::int16_t>(2 + (i % 6) * 53), static_cast<std::int16_t>(30 + (i / 6) * 70), 51, 66};
 }
 
 // Small line icons for the home tiles, drawn around (cx, cy) in about 18 x 18 px.
@@ -690,6 +701,13 @@ void homeIcon(int index, int cx, int cy, std::uint16_t c, std::uint16_t bg) {
             thickLine(cx - 2, cy - 6, cx + 2, cy - 6, c, bg);
             gfx->fillSmoothCircle(cx, cy + 6, 1, c, bg);
             break;
+        case 15:  // blocks: a hook on the floor and one more cell falling in
+            gfx->fillRoundRect(cx - 10, cy + 3, 6, 6, 1, c);
+            gfx->fillRoundRect(cx - 3, cy + 3, 6, 6, 1, c);
+            gfx->fillRoundRect(cx + 4, cy + 3, 6, 6, 1, c);
+            gfx->fillRoundRect(cx + 4, cy - 4, 6, 6, 1, c);
+            gfx->fillRoundRect(cx - 7, cy - 10, 6, 6, 1, c);
+            break;
         default:
             break;
     }
@@ -703,19 +721,20 @@ void renderHome() {
         if (!changed(i, tr(e.zh, e.en), selected ? 1 : 0)) {
             continue;
         }
+        // Phone-style tile: white line icon on a coloured disc, name underneath. The cursor lightens the
+        // tile and rings the disc, so a 3-character name keeps the full 51 px tile width.
+        const std::uint16_t face = selected ? kButton : kCard;
         gfx->fillRect(r.x, r.y, r.w, r.h, kBg);
-        if (selected) {
-            panel(r.x, r.y, r.w, r.h, 10, kAccent);
-            panel(r.x + 2, r.y + 2, r.w - 4, r.h - 4, 8, kCard, kAccent);
-        } else {
-            panel(r.x, r.y, r.w, r.h, 10, kCard);
-        }
-        // Phone-style tile: white line icon on a coloured disc, name underneath.
+        panel(r.x, r.y, r.w, r.h, 10, face);
         const int cx = r.x + r.w / 2;
         const int cy = r.y + 24;
-        gfx->fillSmoothCircle(cx, cy, 16, e.color, kCard);
+        if (selected) {
+            gfx->fillSmoothCircle(cx, cy, 20, kAccent, face);
+            gfx->fillSmoothCircle(cx, cy, 18, face, kAccent);
+        }
+        gfx->fillSmoothCircle(cx, cy, 16, e.color, face);
         homeIcon(e.icon, cx, cy, kWhite, e.color);
-        text(tr(e.zh, e.en), cx, r.y + 53, Font::Small, kFg, kCard, 0, MC_DATUM, 2);
+        text(tr(e.zh, e.en), cx, r.y + 54, Font::Small, selected ? kWhite : kFg, face, 0, MC_DATUM, 2, false);
     }
 }
 
@@ -1384,8 +1403,8 @@ void checkNewMessage(std::uint32_t now) {
         msg::markAllRead();  // already looking at the list; it redraws by itself
         return;
     }
-    if (currentPage == Page::TouchCal) {
-        return;
+    if (currentPage == Page::TouchCal || currentPage == Page::Game) {
+        return;              // in the game the status bar shows "新消息 N" instead of a banner over the well
     }
     bannerShown = true;
     bannerUntilMs = now + kBannerMs;
@@ -2248,6 +2267,234 @@ void renderRemote() {
     }
 }
 
+// ------------------------------------------------------------ 色环方块 (falling-block game, logic in game.cpp)
+// The well sits in the middle (10 x 19 cells of 11 px); score card and left / right pads on the left,
+// next piece, pause, rotate and drop on the right. The whole content area is redrawn every frame
+// (cheap in the PSRAM frame buffer; present() only sends the rows that changed).
+constexpr int kCell = 11;
+constexpr int kWellX = 105;
+constexpr int kWellY = 29;
+const Rect kGameWell = {kWellX, kWellY, game::kCols * kCell, game::kRows * kCell};
+const Rect kGameLeft = {6, 136, 44, 98};
+const Rect kGameRight = {54, 136, 44, 98};
+const Rect kGamePause = {222, 100, 92, 30};
+const Rect kGameRotate = {222, 136, 92, 46};
+const Rect kGameDrop = {222, 188, 92, 46};
+
+// Piece colours follow the resistor colour code: brown 1 .. violet 7; the fuse is silver.
+// Each cell is a body colour with a darker band across it.
+const std::uint16_t kPieceBody[game::kPieceTypes] = {
+    rgb(0x9A6138), rgb(0xE5484D), rgb(0xF5923E), rgb(0xF2D04B),
+    rgb(0x46B565), rgb(0x3E8EF0), rgb(0x9D5CE6), rgb(0xCBD5E1),
+};
+const std::uint16_t kPieceBand[game::kPieceTypes] = {
+    rgb(0x5E3A20), rgb(0x9E2A2E), rgb(0xB45F1E), rgb(0xA8891A),
+    rgb(0x2B7A40), rgb(0x2559A3), rgb(0x6A35A8), rgb(0x475569),
+};
+constexpr std::uint16_t kWellColor = rgb(0x0E1626);
+
+String ohmsScore(std::uint32_t v) {
+    if (v < 1000) {
+        return String(v) + "Ω";
+    }
+    if (v < 1000000) {
+        return String(v / 1000.0f, v < 10000 ? 2 : (v < 100000 ? 1 : 0)) + "kΩ";
+    }
+    return String(v / 1000000.0f, 2) + "MΩ";
+}
+
+void drawGameCell(int px, int py, int type) {
+    gfx->fillRoundRect(px, py, kCell - 1, kCell - 1, 2, kPieceBody[type]);
+    if (type == game::kFuse) {          // glass fuse: wire through the middle, darker end caps
+        gfx->fillRect(px, py + 1, 2, kCell - 3, kPieceBand[type]);
+        gfx->fillRect(px + kCell - 3, py + 1, 2, kCell - 3, kPieceBand[type]);
+        gfx->drawFastHLine(px + 2, py + 4, kCell - 5, kPieceBand[type]);
+    } else {
+        gfx->fillRect(px + 4, py + 1, 2, kCell - 3, kPieceBand[type]);
+    }
+}
+
+void drawPreview(int type, int cx, int cy) {
+    std::int8_t xs[4];
+    std::int8_t ys[4];
+    const int n = game::shape(type, 0, xs, ys);
+    if (n == 0) {
+        return;
+    }
+    int minX = 9, maxX = -9, minY = 9, maxY = -9;
+    for (int i = 0; i < n; ++i) {
+        minX = std::min<int>(minX, xs[i]);
+        maxX = std::max<int>(maxX, xs[i]);
+        minY = std::min<int>(minY, ys[i]);
+        maxY = std::max<int>(maxY, ys[i]);
+    }
+    const int ox = cx - (maxX - minX + 1) * kCell / 2;
+    const int oy = cy - (maxY - minY + 1) * kCell / 2;
+    for (int i = 0; i < n; ++i) {
+        drawGameCell(ox + (xs[i] - minX) * kCell, oy + (ys[i] - minY) * kCell, type);
+    }
+}
+
+void gamePad(const Rect& r, std::uint16_t fill) {
+    panel(r.x, r.y, r.w, r.h, 10, fill);
+}
+
+void gameOverlay(int x, int y, int w, int h) {
+    panel(x - 2, y - 2, w + 4, h + 4, 14, kAccent);
+    panel(x, y, w, h, 12, kCard, kAccent);
+}
+
+void renderGame() {
+    const game::State st = game::state();
+    gfx->fillRect(0, kBar + 1, kWidth, kHeight - kBar - 1, kBg);
+
+    // score card
+    panel(6, 30, 92, 100, 10, kCard);
+    text(tr("得分", "Score"), 14, 36, Font::Small, kDim, kCard, 0, TL_DATUM, 2, false);
+    text(ohmsScore(game::score()), 14, 57, Font::Large, kInfo, kCard, 0, TL_DATUM, 2, false);
+    text(String(tr("最高", "Best ")) + ohmsScore(game::best()), 12, 86, Font::Small, kDim, kCard, 0, TL_DATUM, 2, false);
+    text(String(tr("行 ", "Ln ")) + game::lines() + tr("  级 ", "  Lv ") + game::level(), 12, 106, Font::Small, kFg,
+        kCard, 0, TL_DATUM, 2, false);
+
+    // left / right pads
+    const bool playing = st == game::State::Playing;
+    const std::uint16_t padFg = playing ? kFg : kBorder;
+    gamePad(kGameLeft, kButton);
+    gamePad(kGameRight, kButton);
+    const int lcx = kGameLeft.x + kGameLeft.w / 2;
+    const int rcx = kGameRight.x + kGameRight.w / 2;
+    const int pcy = kGameLeft.y + kGameLeft.h / 2;
+    gfx->fillTriangle(lcx + 6, pcy - 10, lcx + 6, pcy + 10, lcx - 8, pcy, padFg);
+    gfx->fillTriangle(rcx - 6, pcy - 10, rcx - 6, pcy + 10, rcx + 8, pcy, padFg);
+
+    // well
+    gfx->fillRoundRect(kGameWell.x - 2, kGameWell.y - 2, kGameWell.w + 3, kGameWell.h + 3, 3, kBorder);
+    gfx->fillRect(kGameWell.x - 1, kGameWell.y - 1, kGameWell.w + 1, kGameWell.h + 1, kWellColor);
+    static std::uint8_t cells[game::kRows][game::kCols];
+    game::view(cells);
+    for (int y = 0; y < game::kRows; ++y) {
+        for (int x = 0; x < game::kCols; ++x) {
+            const std::uint8_t v = cells[y][x];
+            const int px = kWellX + x * kCell;
+            const int py = kWellY + y * kCell;
+            if (v == 0) {
+                gfx->drawPixel(px + kCell / 2 - 1, py + kCell / 2 - 1, kButton);    // faint grid dots
+            } else if (v & game::kFlash) {
+                gfx->fillRoundRect(px, py, kCell - 1, kCell - 1, 2, kWhite);
+            } else if (v & game::kGhost) {
+                gfx->drawRoundRect(px + 1, py + 1, kCell - 3, kCell - 3, 2, kPieceBody[(v & 0x0F) - 1]);
+            } else {
+                drawGameCell(px, py, (v & 0x0F) - 1);
+            }
+        }
+    }
+
+    // next piece
+    panel(222, 30, 92, 64, 10, kCard);
+    text(tr("下一个", "Next"), 230, 36, Font::Small, kDim, kCard, 0, TL_DATUM, 2, false);
+    if (st != game::State::Ready) {
+        const int next = game::nextType();
+        if (next == game::kFuse) {
+            drawPreview(next, 242, 74);
+            text(tr("熔丝", "Fuse"), 256, 74, Font::Small, kWarn, kCard, 0, ML_DATUM, 2, false);
+        } else {
+            drawPreview(next, 268, 74);
+        }
+    }
+
+    // pause / rotate / drop
+    const char* pauseText = st == game::State::Paused ? tr("继续", "Resume")
+        : (playing || st == game::State::Clearing) ? tr("暂停", "Pause") : tr("开始", "Start");
+    gamePad(kGamePause, st == game::State::Paused ? kAccent : kButton);
+    text(pauseText, kGamePause.x + kGamePause.w / 2, kGamePause.y + kGamePause.h / 2 + 1, Font::Small, kFg,
+        st == game::State::Paused ? kAccent : kButton, 0, MC_DATUM, 2, false);
+    gamePad(kGameRotate, kButton);
+    text(tr("旋转", "Turn"), kGameRotate.x + kGameRotate.w / 2, kGameRotate.y + kGameRotate.h / 2 + 1, Font::Large,
+        padFg, kButton, 0, MC_DATUM, 2, false);
+    gamePad(kGameDrop, playing ? kBlue : kButton);
+    text(tr("落下", "Drop"), kGameDrop.x + kGameDrop.w / 2, kGameDrop.y + kGameDrop.h / 2 + 1, Font::Large,
+        playing ? kWhite : kBorder, playing ? kBlue : kButton, 0, MC_DATUM, 2, false);
+
+    // overlays
+    if (st == game::State::Ready) {
+        gameOverlay(30, 38, 260, 188);
+        text(tr("色环方块", "Band Blocks"), 160, 46, Font::Large, kWhite, kCard, 0, TC_DATUM, 2, false);
+        text(tr("转旋钮 = 左右移动", "Turn knob = move"), 160, 80, Font::Small, kFg, kCard, 0, TC_DATUM, 2, false);
+        text(tr("按一下 = 旋转", "Press = rotate"), 160, 102, Font::Small, kFg, kCard, 0, TC_DATUM, 2, false);
+        text(tr("按住再转 = 一落到底", "Hold + turn = drop"), 160, 124, Font::Small, kFg, kCard, 0, TC_DATUM, 2, false);
+        text(tr("银色熔丝落地会烧掉一整行", "A silver fuse burns out its row"), 160, 150, Font::Small, kWarn, kCard,
+            0, TC_DATUM, 2, false);
+        text(tr("长按旋钮返回，游戏自动暂停", "Long press = back (pauses)"), 160, 172, Font::Small, kDim, kCard, 0,
+            TC_DATUM, 2, false);
+        text(tr("按旋钮或点屏幕开始", "Press or tap to start"), 160, 198, Font::Small, kInfo, kCard, 0, TC_DATUM, 2,
+            false);
+    } else if (st == game::State::Paused) {
+        gameOverlay(80, 96, 160, 76);
+        text(tr("已暂停", "Paused"), 160, 104, Font::Large, kWhite, kCard, 0, TC_DATUM, 2, false);
+        text(tr("按旋钮继续", "Press to resume"), 160, 140, Font::Small, kInfo, kCard, 0, TC_DATUM, 2, false);
+    } else if (st == game::State::Over) {
+        gameOverlay(50, 66, 220, 132);
+        text(tr("游戏结束", "Game over"), 160, 74, Font::Large, kWhite, kCard, 0, TC_DATUM, 2, false);
+        text(String(tr("得分 ", "Score ")) + ohmsScore(game::score()), 160, 110, Font::Small, kFg, kCard, 0, TC_DATUM,
+            2, false);
+        if (game::newBest()) {
+            text(tr("新纪录！", "New best!"), 160, 134, Font::Small, kGood, kCard, 0, TC_DATUM, 2, false);
+        } else {
+            text(String(tr("最高 ", "Best ")) + ohmsScore(game::best()), 160, 134, Font::Small, kDim, kCard, 0,
+                TC_DATUM, 2, false);
+        }
+        text(tr("按旋钮再来一局", "Press to play again"), 160, 166, Font::Small, kInfo, kCard, 0, TC_DATUM, 2, false);
+    }
+}
+
+Tap gameTouch(int x, int y) {
+    const std::uint32_t now = millis();
+    const game::State st = game::state();
+    if (y < kBar) {
+        return Tap::None;
+    }
+    if (kGamePause.contains(x, y) && (st == game::State::Playing || st == game::State::Clearing)) {
+        game::pause(now);
+        return Tap::Done;
+    }
+    if (st == game::State::Ready || st == game::State::Over) {
+        game::newGame(now);
+        return Tap::Done;
+    }
+    if (st == game::State::Paused) {
+        game::resume(now);
+        return Tap::Done;
+    }
+    if (kGameLeft.contains(x, y)) {
+        game::move(-1, now);
+        return Tap::Repeat;
+    }
+    if (kGameRight.contains(x, y)) {
+        game::move(1, now);
+        return Tap::Repeat;
+    }
+    if (kGameDrop.contains(x, y)) {
+        game::drop(now);
+        return Tap::Done;
+    }
+    if (kGameRotate.contains(x, y) || kGameWell.contains(x, y)) {
+        game::rotate(now);
+        return Tap::Done;
+    }
+    return Tap::None;
+}
+
+void gamePress() {
+    const std::uint32_t now = millis();
+    switch (game::state()) {
+        case game::State::Ready:
+        case game::State::Over: game::newGame(now); break;
+        case game::State::Paused: game::resume(now); break;
+        case game::State::Playing: game::rotate(now); break;
+        default: break;
+    }
+}
+
 // ------------------------------------------------------------ page switching / dispatch
 void clearContent() {
     useFont(Font::Builtin);
@@ -2275,6 +2522,12 @@ void enterPage(Page page) {
     }
     if (currentPage != Page::Menu && page == Page::Menu) {
         app::saveSettings();
+    }
+    if (currentPage == Page::Game && page != Page::Game) {
+        game::pause(millis());
+    }
+    if (page == Page::Game) {
+        game::begin();
     }
 
     currentPage = page;
@@ -2332,6 +2585,7 @@ void renderPage() {
         case Page::NtcPick: renderNtcPick(); break;
         case Page::PowerBank: renderPowerBank(); break;
         case Page::Remote: renderRemote(); break;
+        case Page::Game: renderGame(); break;
         default: break;
     }
 }
@@ -2418,6 +2672,9 @@ Tap onTouch(int x, int y) {
                 }
             }
             break;
+
+        case Page::Game:
+            return gameTouch(x, y);
 
         case Page::Menu:
             for (int i = 0; i < kHomeCount; ++i) {
@@ -2729,6 +2986,12 @@ void onRotate(int steps) {
             }
             break;
 
+        case Page::Game:
+            for (int i = 0; i < (steps < 0 ? -steps : steps); ++i) {
+                game::move(steps > 0 ? 1 : -1, millis());
+            }
+            break;
+
         case Page::Pomodoro:
             if (timerMode == 0 && !pomoRunning && !pomoPaused) {
                 pomoDone = false;
@@ -2807,6 +3070,9 @@ void onShortPress() {
             break;
         case Page::Remote:
             remotePress(1);           // play / pause
+            break;
+        case Page::Game:
+            gamePress();
             break;
         case Page::TouchCal:
             config.touchSkipped = true;
@@ -2973,10 +3239,22 @@ void loop() {
     if (steps != 0) {
         if (bannerShown) {
             hideBanner();    // first turn only dismisses the banner
+        } else if (currentPage == Page::Game && knobHeld()) {
+            if (!pressUsed) {    // push-and-turn: drop once per press, and the press itself does nothing
+                pressUsed = true;
+                game::drop(now);
+            }
         } else {
             onRotate(steps);
         }
         dirty = true;
+    }
+    if (currentPage == Page::Game) {
+        if (bannerShown) {
+            game::pause(now);    // e.g. the timer-done banner
+        } else if (game::tick(now)) {
+            dirty = true;
+        }
     }
 
     switch (pollButton()) {

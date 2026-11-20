@@ -25,6 +25,7 @@ enum class Page : std::uint8_t {
     NtcPick,
     PowerBank,
     Remote,
+    Game,
     Count,
 };
 
