@@ -113,6 +113,9 @@ STATE?                         一行 JSON 状态（同 /api/state；手机网�
 HID? / UNPAIR                  蓝牙键盘：已配对 / 已连接台数；清除所有配对
 REMOTE <VOLUP|VOLDOWN|PLAY|NEXT|PREV|SHUTTER|MUTE|UP|DOWN|HOME>   经蓝牙键盘发给手机（SHUTTER = 音量+ = iPhone 相机快门）
 ANCS?                          iPhone 通知链路状态：LINK=1 已订阅，RX=收到条数，ERR=最近的错误
+MEM?                           资源占用：HEAP=内部 RAM 空闲/总量 MIN=开机以来最低 BLOCK=最大连续块，PSRAM= 同上；
+                               APP=固件大小/分区，NVS=已用/总条目，LOOP=主循环频率 MAXLOOP=上次查询以来最长一圈；
+                               PART 分区表；TASKS 各任务剩余栈（字节）；CPU 两核占用（自上次 MEM? 起，核心支持时才有）
 SHOT [起始行] [行数]           截屏：SHOT 320 240 <行> <行数>，然后每行 "<y> <base64>"，内容是 RLE：[次数-1][RGB565 高][低]；
                                界面先画在 PSRAM 帧缓冲里，所以和屏幕接线无关（host/tools/screenshot.py 存 PNG）
 ```

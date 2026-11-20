@@ -2,7 +2,11 @@
 
 #include <Preferences.h>
 #include <Wire.h>
+#include <esp_heap_caps.h>
+#include <esp_ota_ops.h>
+#include <esp_partition.h>
 #include <esp_system.h>
+#include <nvs.h>
 
 #include <cctype>
 #include <cmath>
@@ -335,7 +339,7 @@ const char* const kHelpText =
     "IMGNEW <slot> <w> <h> | IMGDAT <slot> <off> <b64> | IMGEND <slot> | IMGCLR <slot>\n"
     "SYS <cpu> <ram> <down> <up> | PLAY <0|1> | CI <0..3> [HH:MM] | MACRO <0..5> <action> | MACRO?\n"
     "USBMODE <PC|PBANK> | USBMODE? | PB? | PBLOG? | SHOT [row] [rows] | STATE?\n"
-    "HID? | ANCS? | REMOTE <VOLUP|VOLDOWN|PLAY|NEXT|PREV|SHUTTER|MUTE|UP|DOWN|HOME> | UNPAIR\n"
+    "HID? | ANCS? | MEM? | REMOTE <VOLUP|VOLDOWN|PLAY|NEXT|PREV|SHUTTER|MUTE|UP|DOWN|HOME> | UNPAIR\n"
     "PAGE <0..17> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
 
 String handleCalibration(String* tokens, int count) {
@@ -385,6 +389,107 @@ String handleCalibration(String* tokens, int count) {
     return "OK";
 }
 
+// ---- MEM? diagnostics ----
+TaskHandle_t loopTaskHandle = nullptr;
+std::uint32_t lastLoopUs = 0;
+std::uint32_t loopWindowStartMs = 0;
+std::uint32_t loopWindowCount = 0;
+std::uint32_t loopRateHz = 0;
+std::uint32_t loopMaxUs = 0;   // longest loop iteration since the previous MEM?
+
+void trackLoop(std::uint32_t nowMs) {
+    const std::uint32_t us = micros();
+    if (lastLoopUs != 0 && us - lastLoopUs > loopMaxUs) {
+        loopMaxUs = us - lastLoopUs;
+    }
+    lastLoopUs = us;
+    ++loopWindowCount;
+    if (nowMs - loopWindowStartMs >= 1000) {
+        loopRateHz = loopWindowCount * 1000UL / (nowMs - loopWindowStartMs);
+        loopWindowCount = 0;
+        loopWindowStartMs = nowMs;
+    }
+}
+
+String kib(std::size_t bytes) {
+    return String(static_cast<unsigned>((bytes + 512) / 1024)) + "K";
+}
+
+void appendPartitions(String& out, esp_partition_type_t type) {
+    for (esp_partition_iterator_t it = esp_partition_find(type, ESP_PARTITION_SUBTYPE_ANY, nullptr); it != nullptr;
+         it = esp_partition_next(it)) {
+        const esp_partition_t* p = esp_partition_get(it);
+        out += String(" ") + p->label + "=" + kib(p->size);
+    }
+}
+
+String heapLine(const char* name, std::uint32_t caps) {
+    multi_heap_info_t info = {};
+    heap_caps_get_info(&info, caps);
+    return String(name) + "=" + kib(info.total_free_bytes) + "/" + kib(info.total_free_bytes + info.total_allocated_bytes)
+        + " MIN=" + kib(info.minimum_free_bytes) + " BLOCK=" + kib(info.largest_free_block);
+}
+
+String memoryReport() {
+    // HEAP = internal RAM (free/total), PSRAM = external 8 MB; MIN = lowest free since boot, BLOCK = largest free piece
+    String out = String("MEM ") + heapLine("HEAP", MALLOC_CAP_INTERNAL) + " " + heapLine("PSRAM", MALLOC_CAP_SPIRAM);
+
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    out += String("\nAPP=") + kib(ESP.getSketchSize()) + "/" + kib(running ? running->size : 0);
+    nvs_stats_t nvs = {};
+    if (nvs_get_stats(nullptr, &nvs) == ESP_OK) {
+        out += String(" NVS=") + static_cast<unsigned>(nvs.used_entries) + "/" + static_cast<unsigned>(nvs.total_entries)
+            + " NS=" + static_cast<unsigned>(nvs.namespace_count);
+    }
+    out += String(" UP=") + static_cast<unsigned>(millis() / 1000UL) + " LOOP=" + static_cast<unsigned>(loopRateHz)
+        + "Hz MAXLOOP=" + String(loopMaxUs / 1000.0f, 1) + "ms";
+    loopMaxUs = 0;
+
+    out += "\nPART";
+    appendPartitions(out, ESP_PARTITION_TYPE_APP);
+    appendPartitions(out, ESP_PARTITION_TYPE_DATA);
+
+    // Free stack per task (bytes never used since boot), plus CPU load when the core keeps run-time stats.
+    out += "\nTASKS";
+#if configUSE_TRACE_FACILITY
+    const UBaseType_t capacity = uxTaskGetNumberOfTasks() + 4;
+    TaskStatus_t* tasks = static_cast<TaskStatus_t*>(malloc(sizeof(TaskStatus_t) * capacity));
+    if (tasks != nullptr) {
+        std::uint32_t total = 0;
+        const UBaseType_t got = uxTaskGetSystemState(tasks, capacity, &total);
+        for (UBaseType_t i = 0; i < got; ++i) {
+            out += String(" ") + tasks[i].pcTaskName + "=" + String(static_cast<unsigned>(tasks[i].usStackHighWaterMark));
+        }
+#if configGENERATE_RUN_TIME_STATS
+        static std::uint32_t prevTotal = 0;
+        static std::uint32_t prevIdle[2] = {0, 0};
+        std::uint32_t idle[2] = {0, 0};
+        for (UBaseType_t i = 0; i < got; ++i) {
+            for (int core = 0; core < 2; ++core) {
+                if (tasks[i].xHandle == xTaskGetIdleTaskHandleForCPU(core)) {
+                    idle[core] = tasks[i].ulRunTimeCounter;
+                }
+            }
+        }
+        const std::uint32_t span = total - prevTotal;
+        if (span > 0) {
+            out += "\nCPU";
+            for (int core = 0; core < 2; ++core) {
+                const float busy = 100.0f - 100.0f * static_cast<float>(idle[core] - prevIdle[core]) / span;
+                out += String(" core") + core + "=" + String(busy < 0 ? 0.0f : busy, 1) + "%";
+                prevIdle[core] = idle[core];
+            }
+            prevTotal = total;
+        }
+#endif
+        free(tasks);
+    }
+#else
+    out += String(" loopTask=") + static_cast<unsigned>(uxTaskGetStackHighWaterMark(loopTaskHandle));
+#endif
+    return out;
+}
+
 }  // namespace
 
 void begin() {
@@ -402,6 +507,7 @@ void begin() {
     digitalWrite(board::kRelayPowerEnable, LOW);
     relayBackend.setOutputConnected(false);
 
+    loopTaskHandle = xTaskGetCurrentTaskHandle();
     loadSettings();
     controller.setSolverEnabled(config.solver);
 
@@ -431,6 +537,7 @@ void begin() {
 
 void loop() {
     const std::uint32_t now = millis();
+    trackLoop(now);
     if (rebootPending && static_cast<std::int32_t>(now - rebootAtMs) >= 0) {
         controller.process({AppEventType::SetOutput, 0});
         saveSettings();
@@ -1035,6 +1142,9 @@ String handleCommand(const String& rawLine) {
     }
     if (cmd == "ANCS?") {
         return ancs::status();
+    }
+    if (cmd == "MEM?") {
+        return memoryReport();
     }
     if (cmd == "HID?") {
         return String("HID HOSTS=") + comm::bleKeyboardHosts() + " BONDS=" + comm::bleBondCount();
