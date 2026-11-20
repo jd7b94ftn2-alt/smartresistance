@@ -23,6 +23,7 @@ constexpr std::uint8_t kFlash = 0x80;   // row being cleared
 
 void begin();                           // loads the best score from NVS (idempotent)
 void newGame(std::uint32_t now);
+void quit();                            // back to the start screen (资源 page clean-up); best score kept
 void pause(std::uint32_t now);
 void resume(std::uint32_t now);
 State state();

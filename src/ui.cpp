@@ -2569,14 +2569,47 @@ void usageRow(int y, const char* name, std::uint32_t free, std::uint32_t total, 
     gfx->fillRoundRect(14, y + 22, std::min(w, fill), 7, 3, color);
 }
 
+// Apps that keep running while their page is closed: a paused game, the countdown, the stopwatch.
+String backgroundApps() {
+    String names[3];
+    int n = 0;
+    const game::State gs = game::state();
+    if (gs == game::State::Paused || gs == game::State::Playing || gs == game::State::Clearing) {
+        names[n++] = tr("方块游戏", "Blocks");
+    }
+    if (pomoRunning || pomoPaused) {
+        names[n++] = tr("倒计时", "Timer");
+    }
+    if (swRunning || swAccumMs > 0) {
+        names[n++] = tr("秒表", "Stopwatch");
+    }
+    if (n == 0) {
+        return "";
+    }
+    if (n == 1) {
+        return names[0];
+    }
+    if (n == 2) {
+        return names[0] + tr("、", ", ") + names[1];
+    }
+    return names[0] + tr(" 等 3 个", " +2 more");
+}
+
 void sysClean() {
+    const int apps = closeApps();
     const app::Cleanup done = app::cleanup();
-    if (done.freedBytes == 0) {
+    if (apps == 0 && done.freedBytes == 0) {
         sysResult = tr("已经很干净了", "Nothing to free");
     } else {
-        sysResult = String(tr("已释放 ", "Freed ")) + bytesShort(done.freedBytes);
-        if (done.messages > 0) {
-            sysResult += String(tr(" · 已读消息 ", " · read msgs ")) + done.messages;
+        sysResult = "";
+        if (done.freedBytes > 0) {
+            sysResult = String(tr("已释放 ", "Freed ")) + bytesShort(done.freedBytes);
+        }
+        if (apps > 0) {
+            if (sysResult.length() > 0) {
+                sysResult += " · ";
+            }
+            sysResult += String(tr("关闭 ", "closed ")) + apps + tr(" 个应用", " apps");
         }
     }
     sysResultUntil = millis() + 5000;
@@ -2612,10 +2645,11 @@ void renderSystem() {
     char upText[16];
     snprintf(upText, sizeof(upText), "%lu:%02lu:%02lu", static_cast<unsigned long>(up / 3600),
         static_cast<unsigned long>(up / 60 % 60), static_cast<unsigned long>(up % 60));
-    text(String(tr("运行 ", "Up ")) + upText + tr(" · 循环 ", " · loop ") + r.loopHz + "/s", 12, 176, Font::Small, kDim,
-        kBg, 0, TL_DATUM, 2, false);
-    text(String(tr("RAM 开机以来最低剩 ", "RAM low since boot ")) + bytesShort(r.heapMin), 12, 196, Font::Small, kDim,
-        kBg, 0, TL_DATUM, 2, false);
+    text(String(tr("运行 ", "Up ")) + upText + tr(" · 最低剩 ", " · low ") + bytesShort(r.heapMin), 12, 176,
+        Font::Small, kDim, kBg, 0, TL_DATUM, 2, false);
+    const String apps = backgroundApps();
+    text(String(tr("后台：", "Running: ")) + (apps.length() > 0 ? apps : String(tr("无", "none"))), 12, 196, Font::Small,
+        apps.length() > 0 ? kWarn : kDim, kBg, 0, TL_DATUM, 2, false);
     if (sysResult.length() > 0) {
         text(sysResult, 12, 216, Font::Small, kGood, kBg, 0, TL_DATUM, 2, false);
     } else {
@@ -3340,6 +3374,32 @@ void startTouchCalibration() {
 
 bool touchRaw(std::uint16_t& x, std::uint16_t& y, std::uint16_t& z) {
     return readTouchRaw(x, y, z);
+}
+
+int closeApps() {
+    int closed = 0;
+    const game::State gs = game::state();
+    if (gs == game::State::Paused || gs == game::State::Playing || gs == game::State::Clearing) {
+        ++closed;
+    }
+    if (gs != game::State::Ready) {
+        game::quit();                // a finished game goes back to the start screen too (not counted)
+    }
+    if (pomoRunning || pomoPaused) {
+        pomoRunning = false;
+        pomoPaused = false;
+        pomoDone = false;
+        ++closed;
+    }
+    if (swRunning || swAccumMs > 0) {
+        swRunning = false;
+        swAccumMs = 0;
+        ++closed;
+    }
+    if (closed > 0) {
+        dirty = true;
+    }
+    return closed;
 }
 
 void loop() {

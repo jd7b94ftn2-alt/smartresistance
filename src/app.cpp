@@ -1198,8 +1198,9 @@ String handleCommand(const String& rawLine) {
         return memoryReport();
     }
     if (cmd == "CLEAN") {
+        const int apps = ui::closeApps();
         const Cleanup done = cleanup();
-        return String("OK FREED=") + done.freedBytes + " MSGS=" + done.messages;
+        return String("OK FREED=") + done.freedBytes + " MSGS=" + done.messages + " APPS=" + apps;
     }
     if (cmd == "GAME?" || (cmd == "GAME" && count >= 2)) {
         // 色环方块 remote control (tests / screenshots): GAME NEW|LEFT|RIGHT|ROT|DROP|PAUSE|RESUME

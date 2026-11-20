@@ -251,6 +251,17 @@ void newGame(std::uint32_t now) {
     spawn(now);
 }
 
+void quit() {
+    memset(board, 0, sizeof(board));
+    points = 0;
+    rowsCleared = 0;
+    currentLevel = 1;
+    beatBest = false;
+    clearMask = 0;
+    clearFullRows = 0;
+    current = State::Ready;
+}
+
 void pause(std::uint32_t now) {
     if (current == State::Clearing) {
         collapse(now);

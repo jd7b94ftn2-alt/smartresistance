@@ -42,5 +42,8 @@ bool touchRaw(std::uint16_t& x, std::uint16_t& y, std::uint16_t& z);
 // SHOT: screen rows firstRow.. as "SHOT 320 240 <y> <n>" + one "<y> <base64>" line per row;
 // each row is RLE: [run-1][RGB565 hi][RGB565 lo] repeated. Read from the frame buffer.
 String screenshot(int firstRow, int rows);
+// 资源 page / CLEAN: closes what keeps running in the background (a paused 色环方块 game, the
+// countdown, the stopwatch). Instrument functions (resistance output, NTC sweep) are left alone.
+int closeApps();                       // returns how many were closed
 
 }  // namespace ui
