@@ -36,5 +36,8 @@ void applyDisplaySettings();   // rotation + backlight from app::settings()
 void startTouchCalibration();
 // Raw XPT2046 reading (z = pressure, 0 when not pressed); for the TOUCH? command.
 bool touchRaw(std::uint16_t& x, std::uint16_t& y, std::uint16_t& z);
+// SHOT: screen rows firstRow.. as "SHOT 320 240 <y> <n>" + one "<y> <base64>" line per row;
+// each row is RLE: [run-1][RGB565 hi][RGB565 lo] repeated. Read from the frame buffer.
+String screenshot(int firstRow, int rows);
 
 }  // namespace ui

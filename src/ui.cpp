@@ -1,8 +1,10 @@
 #include "ui.h"
 
 #include <TFT_eSPI.h>
+#include <mbedtls/base64.h>
 
 #include <algorithm>
+#include <cstring>
 #include <cmath>
 #include <ctime>
 #include <utility>
@@ -23,6 +25,42 @@ TFT_eSPI tft;
 
 constexpr int kWidth = 320;
 constexpr int kHeight = 240;
+
+// Every page is drawn into one full-screen sprite in PSRAM; present() pushes the rows that changed
+// since the last push. That removes redraw flicker, lets smooth fonts blend with the real background,
+// and gives SHOT a copy of the screen. gfx stays on the panel itself if the sprite cannot be made.
+TFT_eSprite canvas = TFT_eSprite(&tft);
+TFT_eSPI* gfx = &tft;
+std::uint16_t* shadow = nullptr;      // what the panel currently shows, same byte order as the sprite
+
+void present() {
+    if (shadow == nullptr) {
+        return;
+    }
+    const std::uint16_t* frame = static_cast<const std::uint16_t*>(canvas.getPointer());
+    int first = -1;
+    int last = -1;
+    for (int y = 0; y < kHeight; ++y) {
+        if (memcmp(frame + y * kWidth, shadow + y * kWidth, kWidth * 2) != 0) {
+            if (first < 0) {
+                first = y;
+            }
+            last = y;
+        }
+    }
+    if (first < 0) {
+        return;
+    }
+    const int rows = last - first + 1;
+    canvas.pushSprite(0, first, 0, first, kWidth, rows);
+    memcpy(shadow + first * kWidth, frame + first * kWidth, static_cast<std::size_t>(rows) * kWidth * 2);
+}
+
+void invalidatePanel() {              // next present() pushes the whole frame
+    if (shadow != nullptr) {
+        memset(shadow, 0x5A, static_cast<std::size_t>(kWidth) * kHeight * 2);
+    }
+}
 constexpr int kBar = 26;
 constexpr std::uint32_t kLongPressMs = 600;
 constexpr std::uint32_t kDebounceMs = 25;
@@ -71,12 +109,12 @@ void useFont(Font font) {
         return;
     }
     if (loadedFont != Font::Builtin) {
-        tft.unloadFont();
+        gfx->unloadFont();
     }
     if (font == Font::Small) {
-        tft.loadFont(kFontZh16);
+        gfx->loadFont(kFontZh16);
     } else if (font == Font::Large) {
-        tft.loadFont(kFontZh24);
+        gfx->loadFont(kFontZh24);
     }
     loadedFont = font;
 }
@@ -84,13 +122,13 @@ void useFont(Font font) {
 void text(const String& value, int x, int y, Font font, std::uint16_t fg, std::uint16_t bg, int padding,
     std::uint8_t datum, int builtinFont) {
     useFont(font);
-    tft.setTextDatum(datum);
-    tft.setTextColor(fg, bg, true);
-    tft.setTextPadding(padding);
+    gfx->setTextDatum(datum);
+    gfx->setTextColor(fg, bg, true);
+    gfx->setTextPadding(padding);
     if (font == Font::Builtin) {
-        tft.drawString(value, x, y, builtinFont);
+        gfx->drawString(value, x, y, builtinFont);
     } else {
-        tft.drawString(value, x, y);
+        gfx->drawString(value, x, y);
     }
 }
 
@@ -134,7 +172,7 @@ enum class Tap : std::uint8_t { None, Done, Repeat };     // result of a touch h
 // Anti-aliased rounded panel. The background colour is always passed so TFT_eSPI never has to read
 // pixels back from the display.
 void panel(int x, int y, int w, int h, int radius, std::uint16_t fill, std::uint16_t bg = kBg) {
-    tft.fillSmoothRoundRect(x, y, w, h, radius, fill, bg);
+    gfx->fillSmoothRoundRect(x, y, w, h, radius, fill, bg);
 }
 
 int buttonRadius(const Rect& r) {
@@ -160,7 +198,7 @@ void button(int id, const Rect& r, const String& label, Style style, Font font, 
         default: break;
     }
     const int radius = buttonRadius(r);
-    tft.fillRect(r.x, r.y, r.w, r.h, bg);
+    gfx->fillRect(r.x, r.y, r.w, r.h, bg);
     if (focused) {
         // 2 px accent ring: outer accent shape, then the button face inset by 2 px.
         panel(r.x, r.y, r.w, r.h, radius, kAccent, bg);
@@ -457,7 +495,7 @@ void goHome() {
 enum : int { kSlotBack = 56, kSlotTitle, kSlotStatus, kSlotOut };
 
 void thickLine(float x0, float y0, float x1, float y1, std::uint16_t color, std::uint16_t bg, float width = 2.0f) {
-    tft.drawWideLine(x0, y0, x1, y1, width, color, bg);
+    gfx->drawWideLine(x0, y0, x1, y1, width, color, bg);
 }
 
 void drawBackButton() {
@@ -465,7 +503,7 @@ void drawBackButton() {
         return;
     }
     const Rect r = {3, 3, 62, 20};
-    tft.fillRect(r.x, r.y, r.w, r.h, kBarColor);
+    gfx->fillRect(r.x, r.y, r.w, r.h, kBarColor);
     panel(r.x, r.y, r.w, r.h, 10, kButton, kBarColor);
     thickLine(16, 13, 11, 8, kFg, kButton);
     thickLine(11, 13, 16, 18, kFg, kButton);
@@ -530,8 +568,8 @@ void homeIcon(int index, int cx, int cy, std::uint16_t c, std::uint16_t bg) {
             thickLine(cx + 6, cy + 4, cx + 9, cy, c, bg);
             break;
         case 1:   // thermometer
-            tft.drawRoundRect(cx - 3, cy - 9, 7, 13, 3, c);
-            tft.fillSmoothCircle(cx, cy + 6, 5, c, bg);
+            gfx->drawRoundRect(cx - 3, cy - 9, 7, 13, 3, c);
+            gfx->fillSmoothCircle(cx, cy + 6, 5, c, bg);
             break;
         case 2:   // Bluetooth rune
             thickLine(cx - 5, cy - 4, cx + 4, cy + 4, c, bg);
@@ -541,12 +579,12 @@ void homeIcon(int index, int cx, int cy, std::uint16_t c, std::uint16_t bg) {
             thickLine(cx + 4, cy - 4, cx - 5, cy + 4, c, bg);
             break;
         case 3:   // knob
-            tft.drawSmoothCircle(cx, cy, 8, c, bg);
-            tft.drawSmoothCircle(cx, cy, 7, c, bg);
+            gfx->drawSmoothCircle(cx, cy, 8, c, bg);
+            gfx->drawSmoothCircle(cx, cy, 7, c, bg);
             thickLine(cx, cy, cx + 4, cy - 5, c, bg);
             break;
         case 4:   // terminal
-            tft.drawRoundRect(cx - 9, cy - 7, 19, 15, 3, c);
+            gfx->drawRoundRect(cx - 9, cy - 7, 19, 15, 3, c);
             thickLine(cx - 5, cy - 3, cx - 1, cy, c, bg);
             thickLine(cx - 1, cy, cx - 5, cy + 3, c, bg);
             thickLine(cx + 1, cy + 3, cx + 5, cy + 3, c, bg);
@@ -558,27 +596,27 @@ void homeIcon(int index, int cx, int cy, std::uint16_t c, std::uint16_t bg) {
             thickLine(cx + 5, cy - 6, cx + 9, cy - 3, c, bg);
             break;
         case 6:   // clock
-            tft.drawSmoothCircle(cx, cy, 8, c, bg);
-            tft.drawSmoothCircle(cx, cy, 7, c, bg);
+            gfx->drawSmoothCircle(cx, cy, 8, c, bg);
+            gfx->drawSmoothCircle(cx, cy, 7, c, bg);
             thickLine(cx, cy - 5, cx, cy, c, bg);
             thickLine(cx, cy, cx + 4, cy + 2, c, bg);
             break;
         case 7:   // relay: coil and contact
-            tft.drawRect(cx - 8, cy - 3, 6, 10, c);
+            gfx->drawRect(cx - 8, cy - 3, 6, 10, c);
             thickLine(cx, cy + 6, cx + 7, cy - 4, c, bg);
-            tft.fillSmoothCircle(cx + 7, cy + 6, 2, c, bg);
+            gfx->fillSmoothCircle(cx + 7, cy + 6, 2, c, bg);
             break;
         case 8:   // gear
             for (int k = 0; k < 8; ++k) {
                 const float a = k * 0.785398f;
                 thickLine(cx + 6 * cosf(a), cy + 6 * sinf(a), cx + 9 * cosf(a), cy + 9 * sinf(a), c, bg, 3.0f);
             }
-            tft.drawSmoothCircle(cx, cy, 6, c, bg);
-            tft.drawSmoothCircle(cx, cy, 5, c, bg);
+            gfx->drawSmoothCircle(cx, cy, 6, c, bg);
+            gfx->drawSmoothCircle(cx, cy, 5, c, bg);
             break;
         case 9:   // monitor
-            tft.drawRoundRect(cx - 9, cy - 8, 19, 13, 2, c);
-            tft.drawRoundRect(cx - 8, cy - 7, 17, 11, 2, c);
+            gfx->drawRoundRect(cx - 9, cy - 8, 19, 13, 2, c);
+            gfx->drawRoundRect(cx - 8, cy - 7, 17, 11, 2, c);
             thickLine(cx, cy + 5, cx, cy + 8, c, bg);
             thickLine(cx - 5, cy + 9, cx + 5, cy + 9, c, bg);
             break;
@@ -586,27 +624,27 @@ void homeIcon(int index, int cx, int cy, std::uint16_t c, std::uint16_t bg) {
             for (int k = 0; k < 4; ++k) {
                 const int kx = cx - 9 + (k % 2) * 10;
                 const int ky = cy - 9 + (k / 2) * 10;
-                tft.drawRoundRect(kx, ky, 8, 8, 2, c);
-                tft.drawRoundRect(kx + 1, ky + 1, 6, 6, 1, c);
+                gfx->drawRoundRect(kx, ky, 8, 8, 2, c);
+                gfx->drawRoundRect(kx + 1, ky + 1, 6, 6, 1, c);
             }
             break;
         case 11:  // timer
-            tft.drawSmoothCircle(cx, cy + 2, 8, c, bg);
-            tft.drawSmoothCircle(cx, cy + 2, 7, c, bg);
+            gfx->drawSmoothCircle(cx, cy + 2, 8, c, bg);
+            gfx->drawSmoothCircle(cx, cy + 2, 7, c, bg);
             thickLine(cx, cy + 2, cx, cy - 3, c, bg);
             thickLine(cx, cy + 2, cx + 3, cy + 4, c, bg);
             thickLine(cx - 3, cy - 9, cx + 3, cy - 9, c, bg);
             break;
         case 12:  // envelope
-            tft.drawRoundRect(cx - 9, cy - 6, 19, 13, 2, c);
-            tft.drawRoundRect(cx - 8, cy - 5, 17, 11, 2, c);
+            gfx->drawRoundRect(cx - 9, cy - 6, 19, 13, 2, c);
+            gfx->drawRoundRect(cx - 8, cy - 5, 17, 11, 2, c);
             thickLine(cx - 7, cy - 4, cx, cy + 1, c, bg);
             thickLine(cx, cy + 1, cx + 7, cy - 4, c, bg);
             break;
         case 13:  // battery with a bolt
-            tft.drawRoundRect(cx - 9, cy - 5, 16, 11, 2, c);
-            tft.drawRoundRect(cx - 8, cy - 4, 14, 9, 2, c);
-            tft.fillRect(cx + 7, cy - 2, 3, 5, c);
+            gfx->drawRoundRect(cx - 9, cy - 5, 16, 11, 2, c);
+            gfx->drawRoundRect(cx - 8, cy - 4, 14, 9, 2, c);
+            gfx->fillRect(cx + 7, cy - 2, 3, 5, c);
             thickLine(cx, cy - 4, cx - 3, cy + 1, c, bg);
             thickLine(cx - 3, cy + 1, cx + 1, cy - 1, c, bg);
             thickLine(cx + 1, cy - 1, cx - 2, cy + 4, c, bg);
@@ -624,7 +662,7 @@ void renderHome() {
         if (!changed(i, tr(e.zh, e.en), selected ? 1 : 0)) {
             continue;
         }
-        tft.fillRect(r.x, r.y, r.w, r.h, kBg);
+        gfx->fillRect(r.x, r.y, r.w, r.h, kBg);
         if (selected) {
             panel(r.x, r.y, r.w, r.h, 10, kAccent);
             panel(r.x + 2, r.y + 2, r.w - 4, r.h - 4, 8, kCard, kAccent);
@@ -634,7 +672,7 @@ void renderHome() {
         // Phone-style tile: white line icon on a coloured disc, name underneath.
         const int cx = r.x + r.w / 2;
         const int cy = r.y + 24;
-        tft.fillSmoothCircle(cx, cy, 16, e.color, kCard);
+        gfx->fillSmoothCircle(cx, cy, 16, e.color, kCard);
         homeIcon(e.icon, cx, cy, kWhite, e.color);
         text(tr(e.zh, e.en), cx, r.y + 53, Font::Small, kFg, kCard, 0, MC_DATUM, 2);
     }
@@ -647,8 +685,8 @@ constexpr int kDigitPanelH = 86;
 void drawDigitArrows(int i, bool focused) {
     const int x = digitX(i);
     const std::uint16_t c = focused ? kAccent : kBorder;
-    tft.fillTriangle(x + 6, 40, x + 26, 40, x + 16, 31, c);
-    tft.fillTriangle(x + 6, 94, x + 26, 94, x + 16, 103, c);
+    gfx->fillTriangle(x + 6, 40, x + 26, 40, x + 16, 31, c);
+    gfx->fillTriangle(x + 6, 94, x + 26, 94, x + 16, 103, c);
 }
 
 void staticResistor() {
@@ -673,9 +711,9 @@ void renderResistor() {
         bigNumber(i, x, 43, 34, String(digits[i]), leading ? kBorder : kFg, TL_DATUM, kCard);
         if (changed(10 + i, "", resistorField == i ? 1 : 0)) {
             drawDigitArrows(i, resistorField == i);
-            tft.fillRect(x, 105, 32, 5, kCard);
+            gfx->fillRect(x, 105, 32, 5, kCard);
             if (resistorField == i) {
-                tft.fillSmoothRoundRect(x + 2, 105, 28, 4, 2, kAccent, kCard);
+                gfx->fillSmoothRoundRect(x + 2, 105, 28, 4, 2, kAccent, kCard);
             }
         }
     }
@@ -800,7 +838,7 @@ void drawPickColumn(int col) {
     const Rect& r = kPickColumn[col];
     const int selected = col == 0 ? pickR25 : pickBeta;
     const int count = col == 0 ? kPickR25Count : kPickBetaCount;
-    tft.fillRect(r.x, r.y, r.w, r.h, kBg);
+    gfx->fillRect(r.x, r.y, r.w, r.h, kBg);
     if (pickFocus == col) {
         panel(r.x, r.y, r.w, r.h, 10, kAccent);
         panel(r.x + 2, r.y + 2, r.w - 4, r.h - 4, 8, kCard, kAccent);
@@ -813,7 +851,7 @@ void drawPickColumn(int col) {
         const int y = r.y + 4 + row * kPickRowH;
         const bool sel = index == selected;
         if (sel) {
-            tft.fillSmoothRoundRect(r.x + 8, y + 1, r.w - 16, kPickRowH - 2, 8, pickFocus == col ? kAccent : kButton, kCard);
+            gfx->fillSmoothRoundRect(r.x + 8, y + 1, r.w - 16, kPickRowH - 2, 8, pickFocus == col ? kAccent : kButton, kCard);
         }
         const String value = col == 0 ? ohmsShort(kPickR25[index]) : String("B") + String(kPickBeta[index]);
         text(value, r.x + r.w / 2, y + kPickRowH / 2, sel ? Font::Large : Font::Small, sel ? kWhite : kDim,
@@ -1014,8 +1052,8 @@ void renderTempLog() {
     const int y0 = 66;
     const int width = app::kTempLogSize - 30;
     const int height = 162;
-    tft.fillRect(0, y0 - 2, kWidth, height + 12, kBg);
-    tft.drawRect(x0 - 1, y0 - 1, width + 2, height + 2, kBorder);
+    gfx->fillRect(0, y0 - 2, kWidth, height + 12, kBg);
+    gfx->drawRect(x0 - 1, y0 - 1, width + 2, height + 2, kBorder);
     if (count < 2) {
         text(tr("数据采集中…", "Collecting…"), x0 + width / 2, y0 + height / 2, Font::Small, kDim, kBg, 0, MC_DATUM, 2);
         return;
@@ -1040,7 +1078,7 @@ void renderTempLog() {
         const int x = x0 + (count <= width ? i : static_cast<int>(static_cast<long>(i) * (width - 1) / (count - 1)));
         const int y = y0 + height - 1 - static_cast<int>((app::tempLogAt(i) - low) / (high - low) * (height - 1));
         if (i > 0) {
-            tft.drawLine(previousX, previousY, x, y, kInfo);
+            gfx->drawLine(previousX, previousY, x, y, kInfo);
         }
         previousX = x;
         previousY = y;
@@ -1076,16 +1114,15 @@ void drawBitmap2bpp(int bx, int by, const msg::Message& m, std::uint16_t bg);
 void drawMessageCard(int x, int y, const msg::Message& m, std::uint16_t bg = kBg, std::int32_t strip = -1) {
     const int h = m.height + 8;
     panel(x, y, kMsgCardW, h, 9, kCard, bg);
-    tft.fillSmoothRoundRect(x + 4, y + 7, 4, std::max(4, h - 14), 2,
+    gfx->fillSmoothRoundRect(x + 4, y + 7, 4, std::max(4, h - 14), 2,
         strip >= 0 ? static_cast<std::uint16_t>(strip) : appColor(m.app), kCard);
     drawBitmap2bpp(x + 12, y + 4, m, kCard);
 }
 
 // Host-rendered 2-bit text bitmap on background `bg`; level 0 pixels are skipped.
 void drawBitmap2bpp(int bx, int by, const msg::Message& m, std::uint16_t bg) {
-    const std::uint16_t palette[4] = {bg, tft.alphaBlend(85, kFg, bg), tft.alphaBlend(170, kFg, bg), kFg};
+    const std::uint16_t palette[4] = {bg, gfx->alphaBlend(85, kFg, bg), gfx->alphaBlend(170, kFg, bg), kFg};
     const int stride = (m.width + 3) / 4;
-    tft.startWrite();
     for (int row = 0; row < m.height; ++row) {
         const std::uint8_t* line = m.pixels + row * stride;
         int col = 0;
@@ -1096,12 +1133,11 @@ void drawBitmap2bpp(int bx, int by, const msg::Message& m, std::uint16_t bg) {
                 ++end;
             }
             if (level != 0) {
-                tft.drawFastHLine(bx + col, by + row, end - col, palette[level]);
+                gfx->drawFastHLine(bx + col, by + row, end - col, palette[level]);
             }
             col = end;
         }
     }
-    tft.endWrite();
 }
 
 // ~36 px weather symbol for a WMO code around (cx, cy).
@@ -1110,10 +1146,10 @@ void weatherIcon(int code, int cx, int cy, std::uint16_t bg) {
     const std::uint16_t cloudColor = rgb(0xCBD5E1);
     const std::uint16_t rain = rgb(0x60A5FA);
     auto cloud = [&](int x, int y, std::uint16_t c) {
-        tft.fillSmoothCircle(x - 8, y + 3, 7, c, bg);
-        tft.fillSmoothCircle(x + 1, y - 3, 9, c, bg);
-        tft.fillSmoothCircle(x + 10, y + 3, 7, c, bg);
-        tft.fillRect(x - 8, y + 3, 18, 7, c);
+        gfx->fillSmoothCircle(x - 8, y + 3, 7, c, bg);
+        gfx->fillSmoothCircle(x + 1, y - 3, 9, c, bg);
+        gfx->fillSmoothCircle(x + 10, y + 3, 7, c, bg);
+        gfx->fillRect(x - 8, y + 3, 18, 7, c);
     };
     auto rays = [&](int x, int y, int r0, int r1) {
         for (int k = 0; k < 8; ++k) {
@@ -1122,10 +1158,10 @@ void weatherIcon(int code, int cx, int cy, std::uint16_t bg) {
         }
     };
     if (code == 0) {
-        tft.fillSmoothCircle(cx, cy, 9, sun, bg);
+        gfx->fillSmoothCircle(cx, cy, 9, sun, bg);
         rays(cx, cy, 12, 16);
     } else if (code == 1 || code == 2) {
-        tft.fillSmoothCircle(cx - 6, cy - 6, 7, sun, bg);
+        gfx->fillSmoothCircle(cx - 6, cy - 6, 7, sun, bg);
         rays(cx - 6, cy - 6, 10, 13);
         cloud(cx + 3, cy + 4, cloudColor);
     } else if (code == 45 || code == 48) {
@@ -1140,11 +1176,11 @@ void weatherIcon(int code, int cx, int cy, std::uint16_t bg) {
             }
         } else if ((code >= 71 && code <= 77) || code == 85 || code == 86) {
             for (int k = 0; k < 3; ++k) {
-                tft.fillSmoothCircle(cx - 8 + k * 8, cy + 14, 2, kWhite, bg);
+                gfx->fillSmoothCircle(cx - 8 + k * 8, cy + 14, 2, kWhite, bg);
             }
         } else if (code >= 95) {
-            tft.fillTriangle(cx + 1, cy + 6, cx - 5, cy + 14, cx + 1, cy + 14, sun);
-            tft.fillTriangle(cx - 1, cy + 13, cx + 5, cy + 13, cx - 2, cy + 20, sun);
+            gfx->fillTriangle(cx + 1, cy + 6, cx - 5, cy + 14, cx + 1, cy + 14, sun);
+            gfx->fillTriangle(cx - 1, cy + 13, cx + 5, cy + 13, cx - 2, cy + 20, sun);
         }
     }
 }
@@ -1181,7 +1217,7 @@ void renderInfo() {
         sig = String(w.code) + "," + String(w.temp, 1) + "," + String(w.low) + "," + String(w.high) + "," + String(w.humidity);
     }
     if (changed(2, sig, hasDetail ? msg::imageRevision() : 0U)) {
-        tft.fillRect(0, kWeatherY, kWidth, 62, kBg);
+        gfx->fillRect(0, kWeatherY, kWidth, 62, kBg);
         panel(kMsgCardX, kWeatherY, kMsgCardW, 60, 10, kCard);
         if (w.valid) {
             weatherIcon(w.code, 42, kWeatherY + 30, kCard);
@@ -1207,7 +1243,7 @@ void renderInfo() {
     // With messages stored, the newest card replaces the IP / resistance lines (tap it to open the list).
     const bool showCard = msg::count() > 0;
     if (changed(6, "", showCard ? msg::revision() : 0U)) {
-        tft.fillRect(0, kInfoCardY, kWidth, kHeight - kInfoCardY, kBg);
+        gfx->fillRect(0, kInfoCardY, kWidth, kHeight - kInfoCardY, kBg);
         resetSlotRange(4, 5);
         msg::Message m;
         if (showCard && msg::get(0, m)) {
@@ -1234,7 +1270,7 @@ void renderMessages() {
     if (!changed(0, "", msg::revision() * 64U + static_cast<std::uint32_t>(msgScroll))) {
         return;
     }
-    tft.fillRect(0, kBar + 1, kWidth, kHeight - kBar - 1, kBg);
+    gfx->fillRect(0, kBar + 1, kWidth, kHeight - kBar - 1, kBg);
     resetSlotRange(1, 2);
     if (total == 0) {
         label(1, kWidth / 2, 104, 300, tr("暂无消息", "No messages"), Font::Large, kDim, TC_DATUM);
@@ -1272,14 +1308,14 @@ std::uint32_t announcedMs = 0;        // receivedMs of the newest card already a
 void clearContent();
 
 void drawBanner(const msg::Message& m) {
-    tft.fillRect(0, kBar + 1, kWidth, kBannerH + 10, kBg);
+    gfx->fillRect(0, kBar + 1, kWidth, kBannerH + 10, kBg);
     panel(kMsgCardX - 2, kBannerY - 2, kMsgCardW + 4, m.height + 12, 11, kAccent);
     drawMessageCard(kMsgCardX, kBannerY, m, kAccent);
     bannerIsTimer = false;
 }
 
 void drawTextBanner(const char* title, const char* subtitle, std::uint16_t ring) {
-    tft.fillRect(0, kBar + 1, kWidth, kBannerH + 10, kBg);
+    gfx->fillRect(0, kBar + 1, kWidth, kBannerH + 10, kBg);
     panel(kMsgCardX - 2, kBannerY - 2, kMsgCardW + 4, kBannerH + 4, 11, ring);
     panel(kMsgCardX, kBannerY, kMsgCardW, kBannerH, 9, kCard, ring);
     text(title, kMsgCardX + 16, kBannerY + 18, Font::Large, kFg, kCard, 0, ML_DATUM, 2);
@@ -1332,7 +1368,7 @@ void bar(int id, int x, int y, int w, int h, int percent, std::uint16_t color) {
     if (!changed(id, "", static_cast<std::uint32_t>(percent) | (static_cast<std::uint32_t>(color) << 8))) {
         return;
     }
-    tft.fillRect(x, y, w, h, kBg);
+    gfx->fillRect(x, y, w, h, kBg);
     panel(x, y, w, h, h / 2, kButton);
     if (percent > 0) {
         panel(x, y, std::max(h, w * std::min(percent, 100) / 100), h, h / 2, color);
@@ -1386,7 +1422,7 @@ void renderDesk() {
     msg::Message m;
     const bool hasMedia = msg::image(0, m);
     if (changed(10, "", hasMedia ? msg::imageRevision() * 2U + (desk::playing() ? 1U : 0U) : 0U)) {
-        tft.fillRect(0, kDeskCardY, kWidth, 46, kBg);
+        gfx->fillRect(0, kDeskCardY, kWidth, 46, kBg);
         resetSlotRange(11, 11);
         if (hasMedia) {
             drawMessageCard(kMsgCardX, kDeskCardY, m, kBg, desk::playing() ? kGood : kDim);
@@ -1551,13 +1587,13 @@ void renderPomodoro() {
     } else {
         bigNumber(2, kWidth / 2, 70, 300, stopwatchText(stopwatchMs(now)), running ? kFg : kInfo, TC_DATUM);
         if (changed(3, "", 0xFFFF0000U)) {
-            tft.fillRect(20, 126, 280, 8, kBg);       // no progress bar for the stopwatch
+            gfx->fillRect(20, 126, 280, 8, kBg);       // no progress bar for the stopwatch
         }
         label(4, kWidth / 2, 140, 300, running ? tr("计时中", "Running") : (idle ? tr("按开始计时", "Press start")
             : tr("已暂停", "Paused")), Font::Small, running ? kWarn : kDim, TC_DATUM);
         for (int i = 0; i < 4; ++i) {
             if (changed(5 + i, "", 1)) {
-                tft.fillRect(kTimerPreset[i].x, kTimerPreset[i].y, kTimerPreset[i].w, kTimerPreset[i].h, kBg);
+                gfx->fillRect(kTimerPreset[i].x, kTimerPreset[i].y, kTimerPreset[i].w, kTimerPreset[i].h, kBg);
             }
         }
     }
@@ -1570,7 +1606,7 @@ Tap timerTouch(int x, int y) {
     if (kTimerModeCd.contains(x, y) || kTimerModeSw.contains(x, y)) {
         timerMode = kTimerModeSw.contains(x, y) ? 1 : 0;
         resetSlotRange(2, 8);
-        tft.fillRect(0, 66, kWidth, 124, kBg);
+        gfx->fillRect(0, 66, kWidth, 124, kBg);
         return Tap::Done;
     }
     if (timerMode == 0 && !pomoRunning && !pomoPaused) {
@@ -1729,12 +1765,12 @@ void toggleLanguage() {
 
 // ------------------------------------------------------------ touch calibration page
 void drawCalibrationTarget() {
-    tft.fillScreen(kBg);
+    gfx->fillScreen(kBg);
     const int x = kCalX[calStep];
     const int y = kCalY[calStep];
-    tft.drawFastHLine(x - 15, y, 31, kFg);
-    tft.drawFastVLine(x, y - 15, 31, kFg);
-    tft.drawCircle(x, y, 7, kBad);
+    gfx->drawFastHLine(x - 15, y, 31, kFg);
+    gfx->drawFastVLine(x, y - 15, 31, kFg);
+    gfx->drawCircle(x, y, 7, kBad);
     text(tr("触摸校准", "Touch calibration"), kWidth / 2, 96, Font::Large, kFg, kBg, 0, MC_DATUM, 2);
     text(String(tr("请用笔尖点十字中心  ", "Tap the centre of the cross  ")) + String(calStep + 1) + "/4",
         kWidth / 2, 130, Font::Small, kInfo, kBg, 0, MC_DATUM, 2);
@@ -1872,11 +1908,11 @@ void serviceCalibration(std::uint32_t now) {
     calSumY = 0;
     calWaitRelease = true;
     calReleaseCount = 0;
-    tft.fillCircle(kCalX[calStep], kCalY[calStep], 7, kGood);
+    gfx->fillCircle(kCalX[calStep], kCalY[calStep], 7, kGood);
     if (++calStep < 4) {
         return;
     }
-    tft.fillScreen(kBg);
+    gfx->fillScreen(kBg);
     if (finishCalibration()) {
         text(tr("校准完成", "Calibration done"), kWidth / 2, kHeight / 2, Font::Large, kGood, kBg, 0, MC_DATUM, 2);
         delay(800);
@@ -1891,15 +1927,18 @@ void serviceCalibration(std::uint32_t now) {
 }
 
 // ------------------------------------------------------------ power bank page (USB host link, pbank.h)
-const Rect kBankMode = {8, 204, 304, 32};
+// Smooth fonts fill a box of the font's line height around the text (Small 20 px, Large 27 px, from
+// tools/make_fonts.py metrics); layouts keep those boxes apart so one label never erases another.
+const Rect kBankMode = {8, 206, 304, 30};
 constexpr int kBankTopY = 30;
-constexpr int kBankTopH = 70;
+constexpr int kBankTopH = 66;
 bool bankConfirm = false;             // the mode button asks for a second press (it reboots)
 bool bankRebooting = false;
 std::uint32_t bankConfirmUntil = 0;
 
+// 2 columns x 3 rows, name on the left and value on the right of each cell.
 Rect bankCell(int i) {
-    return Rect{static_cast<std::int16_t>(6 + (i % 3) * 104), static_cast<std::int16_t>(104 + (i / 3) * 48), 100, 44};
+    return Rect{static_cast<std::int16_t>(6 + (i % 2) * 156), static_cast<std::int16_t>(100 + (i / 2) * 35), 152, 32};
 }
 
 String asciiOnly(const char* value) {
@@ -1984,10 +2023,10 @@ void renderPowerBank() {
     const std::uint16_t level = soc < 0 ? kBorder : (soc <= 20 ? kBad : (soc <= 50 ? kWarn : kGood));
     if (changed(1, "", static_cast<std::uint32_t>(soc + 1) | (static_cast<std::uint32_t>(level) << 8))) {
         const int bx = 16;
-        const int by = 49;
+        const int by = 47;
         const int bw = 50;
         const int bh = 32;
-        tft.fillRect(bx - 2, by - 2, bw + 12, bh + 4, kCard);
+        gfx->fillRect(bx - 2, by - 2, bw + 12, bh + 4, kCard);
         panel(bx, by, bw, bh, 6, kFg, kCard);
         panel(bx + 3, by + 3, bw - 6, bh - 6, 4, kCard, kFg);
         panel(bx + bw + 1, by + 10, 5, 12, 2, kFg, kCard);
@@ -1995,8 +2034,8 @@ void renderPowerBank() {
             panel(bx + 5, by + 5, std::max(4, (bw - 10) * soc / 100), bh - 10, 3, level, kCard);
         }
     }
-    bigNumber(2, 176, 41, 100, live ? String(d.soc) : String("--"), live ? kFg : kDim, TR_DATUM, kCard);
-    label(3, 180, 64, 22, "%", Font::Large, kDim, TL_DATUM, kCard);
+    bigNumber(2, 176, 39, 100, live ? String(d.soc) : String("--"), live ? kFg : kDim, TR_DATUM, kCard);
+    label(3, 180, 60, 22, "%", Font::Large, kDim, TL_DATUM, kCard);
 
     const char* line1 = "";
     const char* line2 = "";
@@ -2037,17 +2076,18 @@ void renderPowerBank() {
         default:
             break;
     }
-    label(4, 208, 36, 100, line1, Font::Small, color1, TL_DATUM, kCard);
-    label(5, 208, 56, 100, line2, Font::Small, color2, TL_DATUM, kCard);
+    // three 20 px lines from y 33 to 93, kept 8 px clear of the panel's rounded right edge
+    label(4, 206, 33, 98, line1, Font::Small, color1, TL_DATUM, kCard);
+    label(5, 206, 53, 98, line2, Font::Small, color2, TL_DATUM, kCard);
     String model = asciiOnly(d.model);
     if (model.length() == 0) {
         model = d.chip;
     }
-    label(6, 208, 76, 100, model, Font::Small, kDim, TL_DATUM, kCard);
+    label(6, 206, 73, 98, model, Font::Small, kDim, TL_DATUM, kCard);
 
     // ---- value cells
     static const char* const zh[6] = {"电压", "电流", "功率", "温度", "健康", "循环"};
-    static const char* const en[6] = {"Voltage", "Current", "Power", "Temp", "Health", "Cycles"};
+    static const char* const en[6] = {"Volt", "Amp", "Power", "Temp", "SOH", "Cycle"};
     String values[6];
     std::uint16_t colors[6];
     for (int i = 0; i < 6; ++i) {
@@ -2071,24 +2111,26 @@ void renderPowerBank() {
     }
     for (int i = 0; i < 6; ++i) {
         const Rect r = bankCell(i);
+        const int mid = r.y + r.h / 2;
         if (changed(10 + i, "", 1)) {
             panel(r.x, r.y, r.w, r.h, 8, kCard);
-            text(tr(zh[i], en[i]), r.x + 8, r.y + 3, Font::Small, kDim, kCard, 0, TL_DATUM, 2);
+            text(tr(zh[i], en[i]), r.x + 10, mid, Font::Small, kDim, kCard, 0, ML_DATUM, 2);
         }
-        label(20 + i, r.x + 8, r.y + 31, r.w - 12, values[i], Font::Large, colors[i], ML_DATUM, kCard);
+        // Large box: 27 px centred in the 32 px cell; up to 88 px wide, right of the 52 px name
+        label(20 + i, r.x + r.w - 10, mid, 88, values[i], Font::Large, colors[i], MR_DATUM, kCard);
     }
 }
 
 // ------------------------------------------------------------ page switching / dispatch
 void clearContent() {
     useFont(Font::Builtin);
-    tft.fillScreen(kBg);
+    gfx->fillScreen(kBg);
     resetSlots();
     if (currentPage == Page::TouchCal) {
         return;
     }
-    tft.fillRect(0, 0, kWidth, kBar, kBarColor);
-    tft.drawFastHLine(0, kBar, kWidth, kBorder);
+    gfx->fillRect(0, 0, kWidth, kBar, kBarColor);
+    gfx->drawFastHLine(0, kBar, kWidth, kBorder);
     switch (currentPage) {
         case Page::Resistor: staticResistor(); break;
         case Page::Ntc: staticNtc(); break;
@@ -2651,6 +2693,18 @@ void begin() {
     resetSlots();
     applyDisplaySettings();
     tft.fillScreen(kBg);
+
+    canvas.setColorDepth(16);
+    if (canvas.createSprite(kWidth, kHeight) != nullptr) {
+        shadow = static_cast<std::uint16_t*>(ps_malloc(static_cast<std::size_t>(kWidth) * kHeight * 2));
+        if (shadow != nullptr) {
+            canvas.fillSprite(kBg);
+            memcpy(shadow, canvas.getPointer(), static_cast<std::size_t>(kWidth) * kHeight * 2);
+            gfx = &canvas;
+        } else {
+            canvas.deleteSprite();
+        }
+    }
 }
 
 void applyDisplaySettings() {
@@ -2658,7 +2712,46 @@ void applyDisplaySettings() {
     tft.setRotation(config.rotation == 3 ? 3 : 1);
     ledcWrite(kBacklightChannel, static_cast<std::uint32_t>(config.backlight) * 255 / 100);
     resetSlots();
+    invalidatePanel();       // the frame buffer is still valid, the panel needs all of it again
     dirty = true;
+}
+
+String screenshot(int firstRow, int rows) {
+    if (gfx != &canvas) {
+        return "ERR no frame buffer";
+    }
+    firstRow = std::max(0, std::min(kHeight - 1, firstRow));
+    rows = std::max(1, std::min(kHeight - firstRow, rows));
+    const std::uint8_t* frame = static_cast<const std::uint8_t*>(canvas.getPointer());
+    static std::uint8_t rle[kWidth * 3];
+    static unsigned char encoded[kWidth * 4 + 8];
+    String out;
+    out.reserve(32 + rows * 160);
+    out = String("SHOT ") + kWidth + " " + kHeight + " " + firstRow + " " + rows;
+    for (int y = firstRow; y < firstRow + rows; ++y) {
+        const std::uint8_t* p = frame + static_cast<std::size_t>(y) * kWidth * 2;   // big-endian RGB565
+        int used = 0;
+        int x = 0;
+        while (x < kWidth) {
+            int run = 1;
+            while (x + run < kWidth && run < 256 && p[(x + run) * 2] == p[x * 2] && p[(x + run) * 2 + 1] == p[x * 2 + 1]) {
+                ++run;
+            }
+            rle[used++] = static_cast<std::uint8_t>(run - 1);
+            rle[used++] = p[x * 2];
+            rle[used++] = p[x * 2 + 1];
+            x += run;
+        }
+        std::size_t length = 0;
+        if (mbedtls_base64_encode(encoded, sizeof(encoded), &length, rle, used) != 0) {
+            return "ERR encode";
+        }
+        out += '\n';
+        out += y;
+        out += ' ';
+        out += reinterpret_cast<const char*>(encoded);
+    }
+    return out;
 }
 
 void setPage(Page page) {
@@ -2715,6 +2808,10 @@ void loop() {
             onShortPress();
         }
         takeEncoderSteps();
+        if (now - lastRefreshMs >= 40) {
+            lastRefreshMs = now;
+            present();
+        }
         return;
     }
 
@@ -2760,6 +2857,7 @@ void loop() {
         lastRefreshMs = now;
         dirty = false;
         renderPage();
+        present();
     }
 }
 

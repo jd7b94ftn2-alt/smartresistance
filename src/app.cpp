@@ -333,7 +333,7 @@ const char* const kHelpText =
     "MSGNEW <id> <app> <w> <h> | MSGDAT <id> <off> <b64> | MSGEND <id> | MSG? | MSGREAD | MSGCLR\n"
     "IMGNEW <slot> <w> <h> | IMGDAT <slot> <off> <b64> | IMGEND <slot> | IMGCLR <slot>\n"
     "SYS <cpu> <ram> <down> <up> | PLAY <0|1> | CI <0..3> [HH:MM] | MACRO <0..5> <action> | MACRO?\n"
-    "USBMODE <PC|PBANK> | USBMODE? | PB? | PBLOG?\n"
+    "USBMODE <PC|PBANK> | USBMODE? | PB? | PBLOG? | SHOT [row] [rows]\n"
     "PAGE <0..16> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
 
 String handleCalibration(String* tokens, int count) {
@@ -1030,6 +1030,11 @@ String handleCommand(const String& rawLine) {
     }
     if (cmd == "PB?") {
         return pbank::statusLine();
+    }
+    if (cmd == "SHOT") {
+        const int first = count >= 2 ? tokens[1].toInt() : 0;
+        const int rows = count >= 3 ? tokens[2].toInt() : 240;
+        return ui::screenshot(first, rows);
     }
     if (cmd == "PBLOG?") {
         return pbank::logText();
