@@ -24,6 +24,7 @@
 #include "board_pins.h"
 #include "desk.h"
 #include "pbank.h"
+#include "share.h"
 #include "web_index.h"
 
 namespace comm {
@@ -148,6 +149,39 @@ void startNetworkServices() {
     webServer.on("/api/state", []() { webServer.send(200, "application/json", buildStateJson()); });
     webServer.on("/api/cmd", []() {
         webServer.send(200, "text/plain", app::handleCommand(webServer.arg("c")));
+    });
+    // Shared picture / text: POST /api/upload?kind=IMG|TXT&size=<bytes>&name=<name>, multipart file field.
+    static String uploadError;
+    static int uploadId = -1;
+    static bool uploadFailed = false;
+    webServer.on("/api/upload", HTTP_POST, []() {
+        if (uploadId >= 0) {
+            webServer.send(200, "text/plain", String("OK ID=") + uploadId);
+        } else {
+            webServer.send(400, "text/plain", String("ERR ") + (uploadError.length() ? uploadError : String("no file")));
+        }
+    }, []() {
+        HTTPUpload& up = webServer.upload();
+        if (up.status == UPLOAD_FILE_START) {
+            uploadId = -1;
+            uploadError = "";
+            const share::Kind kind = webServer.arg("kind").equalsIgnoreCase("TXT") ? share::Kind::Text : share::Kind::Image;
+            uploadFailed = !share::beginUpload(kind, static_cast<std::uint32_t>(webServer.arg("size").toInt()),
+                webServer.arg("name"), uploadError);
+        } else if (up.status == UPLOAD_FILE_WRITE) {
+            if (!uploadFailed && !share::writeUpload(up.buf, up.currentSize)) {
+                uploadFailed = true;
+                uploadError = "more data than size";
+                share::abortUpload();
+            }
+        } else if (up.status == UPLOAD_FILE_END) {
+            if (!uploadFailed) {
+                uploadId = share::finishUpload(uploadError);
+            }
+        } else if (up.status == UPLOAD_FILE_ABORTED) {
+            share::abortUpload();
+            uploadError = "aborted";
+        }
     });
     webServer.begin();
     commandServer.begin();
@@ -485,7 +519,7 @@ void bleSendRaw(const std::uint8_t* data, std::size_t size) {
 }
 
 void startBle() {
-    bleQueue = xQueueCreate(12, sizeof(BleLine));
+    bleQueue = xQueueCreate(32, sizeof(BleLine));   // 32 lines: room for a burst of FILEDAT chunks
     NimBLEDevice::init(deviceName.c_str());
     NimBLEDevice::setMTU(247);
     // Keyboards must bond: "Just Works" pairing (no PIN), LE secure connections. The Nordic UART
@@ -643,6 +677,7 @@ void begin() {
         consumerControl.begin();
         hidMouse.begin();
         hidKeyboard.begin();
+        usbSerial.setRxBufferSize(4096);   // file uploads (FILEDAT) stream faster than one loop pass
         usbSerial.begin(115200);
         usbSerial.setTimeout(5);
         USB.begin();

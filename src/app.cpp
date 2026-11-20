@@ -24,6 +24,7 @@
 #include "pbank.h"
 #include "relay_backend.h"
 #include "resistance_controller.h"
+#include "share.h"
 #include "ui.h"
 
 namespace app {
@@ -342,9 +343,10 @@ const char* const kHelpText =
     "SYS <cpu> <ram> <down> <up> | PLAY <0|1> | CI <0..3> [HH:MM] | MACRO <0..5> <action> | MACRO?\n"
     "USBMODE <PC|PBANK> | USBMODE? | PB? | PBLOG? | SHOT [row] [rows] | STATE?\n"
     "WXLOC <lat> <lon> [city] | WXLOC? | WXLOC OFF | IPHONE?\n"
+    "FILENEW <IMG|TXT> <bytes> <name> | FILEDAT <off> <b64> | FILEPOS? | FILEEND <crc32> | FILES? | FILEOPEN <id> | FILEDEL <id|ALL>\n"
     "HID? | ANCS? | MEM? | CLEAN | REMOTE <VOLUP|VOLDOWN|PLAY|NEXT|PREV|SHUTTER|MUTE|UP|DOWN|HOME> | UNPAIR\n"
     "GAME? | GAME <NEW|LEFT|RIGHT|ROT|DROP|PAUSE|RESUME>\n"
-    "PAGE <0..19> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
+    "PAGE <0..20> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
 
 String handleCalibration(String* tokens, int count) {
     Calibration& cal = controller.calibration();
@@ -453,6 +455,7 @@ String memoryReport() {
         out += String(" NVS=") + static_cast<unsigned>(nvs.used_entries) + "/" + static_cast<unsigned>(nvs.total_entries)
             + " NS=" + static_cast<unsigned>(nvs.namespace_count);
     }
+    out += String(" FS=") + kib(share::usedBytes()) + "/" + kib(share::usedBytes() + share::freeBytes());
     out += String(" UP=") + static_cast<unsigned>(millis() / 1000UL) + " LOOP=" + static_cast<unsigned>(loopRateHz)
         + "Hz MAXLOOP=" + String(loopMaxUs / 1000.0f, 1) + "ms";
     loopMaxUs = 0;
@@ -546,6 +549,7 @@ void begin() {
     resistanceController.begin();
     // Stage the last resistance but leave K_OUT open until an explicit command.
     controller.initialize(config.lastOhms);
+    share::begin();                  // LittleFS for shared pictures / text (formats once on first boot)
 }
 
 void loop() {
@@ -918,6 +922,9 @@ String handleCommand(const String& rawLine) {
     if (cmd == "IPHONE?") {
         return apple::status();
     }
+    if (cmd.startsWith("FILE")) {
+        return share::handleCommand(cmd, tokens, count);
+    }
 
     if (cmd == "R") {
         if (count < 2 || !parseOhms(tokens[1], a) || a > smart_resistance::kMaximumResistanceOhms + 0.5) {
@@ -1131,7 +1138,7 @@ String handleCommand(const String& rawLine) {
 
     if (cmd == "PAGE") {
         if (count < 2 || !parseNumber(tokens[1], a) || a < 0 || a >= static_cast<int>(ui::Page::Count)) {
-            return "ERR PAGE <0..19>";
+            return "ERR PAGE <0..20>";
         }
         ui::setPage(static_cast<ui::Page>(static_cast<int>(a)));
         return "OK";

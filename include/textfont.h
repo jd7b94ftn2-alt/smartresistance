@@ -15,5 +15,9 @@ String fit(const char* utf8, int maxWidth);
 // Draws into a 2-bit bitmap (stride (w + 3) / 4, MSB first) with the line box's top at y; glyph
 // levels are scaled by level (1..3) and clipped to x < maxX. Returns the x after the text.
 int draw2bpp(std::uint8_t* bitmap, int w, int h, int x, int y, const char* utf8, int level, int maxX);
+// For wrapping long text (分享 page reader): next code point of [p, end) (advances p; bad bytes = U+FFFD)
+// and the advance width of one code point in px.
+std::uint32_t decode(const char*& p, const char* end);
+int advance(std::uint32_t code);
 
 }  // namespace textfont

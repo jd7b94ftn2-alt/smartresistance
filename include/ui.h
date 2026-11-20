@@ -27,6 +27,7 @@ enum class Page : std::uint8_t {
     Remote,
     Game,
     System,
+    Share,
     Count,
 };
 

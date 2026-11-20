@@ -1,6 +1,8 @@
 #include "ui.h"
 
 #include <TFT_eSPI.h>
+#include <TJpg_Decoder.h>
+#include <esp_heap_caps.h>
 #include <mbedtls/base64.h>
 
 #include <algorithm>
@@ -20,6 +22,8 @@
 #include "game.h"
 #include "messages.h"
 #include "pbank.h"
+#include "share.h"
+#include "textfont.h"
 
 namespace ui {
 namespace {
@@ -440,6 +444,7 @@ const HomeEntry kHome[] = {
     {"旋钮", "Knob", Page::Knob, rgb(0xA855F7), 3},
     {"方块", "Blocks", Page::Game, rgb(0xB45309), 15},
     {"资源", "Sys", Page::System, rgb(0x0E7490), 16},
+    {"分享", "Share", Page::Share, rgb(0xDB2777), 17},
     {"设置", "Setup", Page::About, rgb(0x64748B), 8},
 };
 constexpr int kHomeCount = sizeof(kHome) / sizeof(kHome[0]);
@@ -480,6 +485,7 @@ const char* pageTitle(Page page) {
         case Page::Remote: return tr("手机遥控", "Phone remote");
         case Page::Game: return tr("色环方块", "Band Blocks");
         case Page::System: return tr("系统资源", "System");
+        case Page::Share: return tr("分享", "Shared");
         default: return "";
     }
 }
@@ -731,6 +737,13 @@ void homeIcon(int index, int cx, int cy, std::uint16_t c, std::uint16_t bg) {
             gfx->fillRoundRect(cx + 4, cy + 3, 6, 6, 1, c);
             gfx->fillRoundRect(cx + 4, cy - 4, 6, 6, 1, c);
             gfx->fillRoundRect(cx - 7, cy - 10, 6, 6, 1, c);
+            break;
+        case 17:  // picture: frame, hills, sun
+            gfx->drawRoundRect(cx - 10, cy - 8, 21, 16, 3, c);
+            gfx->drawRoundRect(cx - 9, cy - 7, 19, 14, 2, c);
+            gfx->fillTriangle(cx - 7, cy + 5, cx - 2, cy - 2, cx + 3, cy + 5, c);
+            gfx->fillTriangle(cx + 1, cy + 5, cx + 4, cy + 1, cx + 8, cy + 5, c);
+            gfx->fillSmoothCircle(cx + 4, cy - 3, 2, c, bg);
             break;
         case 16:  // memory chip: body, die, pins above and below
             gfx->drawRoundRect(cx - 8, cy - 6, 17, 13, 2, c);
@@ -1204,7 +1217,7 @@ std::uint16_t appColor(msg::App app) {
     }
 }
 
-void drawBitmap2bpp(int bx, int by, const msg::Message& m, std::uint16_t bg);
+void drawBitmap2bpp(int bx, int by, const msg::Message& m, std::uint16_t bg, std::uint16_t fg = kFg);
 
 // Card = rounded panel + app colour strip + the host-rendered 2-bit text bitmap.
 // Pixels are drawn as horizontal runs; background (level 0) is skipped.
@@ -1217,8 +1230,8 @@ void drawMessageCard(int x, int y, const msg::Message& m, std::uint16_t bg = kBg
 }
 
 // Host-rendered 2-bit text bitmap on background `bg`; level 0 pixels are skipped.
-void drawBitmap2bpp(int bx, int by, const msg::Message& m, std::uint16_t bg) {
-    const std::uint16_t palette[4] = {bg, gfx->alphaBlend(85, kFg, bg), gfx->alphaBlend(170, kFg, bg), kFg};
+void drawBitmap2bpp(int bx, int by, const msg::Message& m, std::uint16_t bg, std::uint16_t fg) {
+    const std::uint16_t palette[4] = {bg, gfx->alphaBlend(85, fg, bg), gfx->alphaBlend(170, fg, bg), fg};
     const int stride = (m.width + 3) / 4;
     for (int row = 0; row < m.height; ++row) {
         const std::uint8_t* line = m.pixels + row * stride;
@@ -2665,6 +2678,360 @@ void renderSystem() {
         0, MC_DATUM, 2, false);
 }
 
+// ------------------------------------------------------------ 分享 page: pictures / text sent from the PC or phone
+// List of the stored files (share.cpp, LittleFS), a full-screen picture viewer (JPEG, TJpg_Decoder)
+// and a paged text reader (UTF-8, the GB2312 text font). A file that just arrived opens by itself.
+enum class ShareView : std::uint8_t { List, Image, Text };
+ShareView shareView = ShareView::List;
+int shareSel = 0;
+int shareTop = 0;
+std::uint16_t shareId = 0;              // file in the viewer
+int shareOpenPending = -1;              // file to show when the page is entered
+bool shareDelConfirm = false;
+std::uint32_t shareDelUntil = 0;
+String shareNote;
+constexpr int kShareRows = 5;
+constexpr int kShareRowY = 30;
+constexpr int kShareRowH = 36;
+const Rect kShareDelete = {236, 211, 76, 26};
+
+constexpr int kTextX = 10;
+constexpr int kTextW = 300;
+constexpr int kTextLines = 9;
+const char* textBase = nullptr;
+std::size_t textSize = 0;
+std::uint32_t* textStarts = nullptr;    // PSRAM: byte offset of every wrapped line
+int textLineCount = 0;
+int textCapacity = 0;
+int textTop = 0;
+
+// One line of UTF-8 in the text font (any GB2312 character), colour fg on bg, top of the line box at y.
+void drawUtf8(int x, int y, int maxWidth, const char* utf8, std::uint16_t fg, std::uint16_t bg) {
+    constexpr int kMaxW = 304;
+    static std::uint8_t line[((kMaxW + 3) / 4) * 20];
+    const int w = std::min(kMaxW, maxWidth);
+    memset(line, 0, sizeof(line));
+    textfont::draw2bpp(line, w, 20, 0, 0, utf8, 3, w);
+    msg::Message m;
+    m.width = static_cast<std::uint16_t>(w);
+    m.height = 20;
+    m.pixels = line;
+    drawBitmap2bpp(x, y, m, bg, fg);
+}
+
+void shareIcon(share::Kind kind, int cx, int cy, std::uint16_t c) {
+    if (kind == share::Kind::Image) {
+        gfx->drawRoundRect(cx - 9, cy - 7, 18, 14, 2, c);
+        gfx->fillTriangle(cx - 7, cy + 5, cx - 3, cy - 1, cx + 1, cy + 5, c);
+        gfx->fillTriangle(cx, cy + 5, cx + 3, cy + 1, cx + 7, cy + 5, c);
+        gfx->fillCircle(cx + 4, cy - 3, 1, c);
+    } else {
+        gfx->drawRoundRect(cx - 7, cy - 9, 14, 18, 2, c);
+        for (int k = 0; k < 3; ++k) {
+            gfx->drawFastHLine(cx - 4, cy - 4 + k * 4, 9, c);
+        }
+    }
+}
+
+bool jpegBlock(std::int16_t x, std::int16_t y, std::uint16_t w, std::uint16_t h, std::uint16_t* bitmap) {
+    if (y >= kHeight) {
+        return false;
+    }
+    gfx->pushImage(x, y, w, h, bitmap);
+    return true;
+}
+
+// Whole screen: the picture centred on black, scaled down by 2 / 4 / 8 when it is bigger than the screen.
+bool drawJpeg(const std::uint8_t* data, std::size_t size) {
+    std::uint16_t w = 0;
+    std::uint16_t h = 0;
+    if (TJpgDec.getJpgSize(&w, &h, data, size) != JDR_OK || w == 0 || h == 0) {
+        return false;
+    }
+    std::uint8_t scale = 1;
+    while (scale < 8 && (w / scale > kWidth || h / scale > kHeight)) {
+        scale = static_cast<std::uint8_t>(scale * 2);
+    }
+    TJpgDec.setJpgScale(scale);
+    TJpgDec.setSwapBytes(true);          // the frame buffer holds RGB565 in panel (big-endian) order
+    TJpgDec.setCallback(jpegBlock);
+    gfx->fillRect(0, 0, kWidth, kHeight, TFT_BLACK);
+    return TJpgDec.drawJpg((kWidth - w / scale) / 2, (kHeight - h / scale) / 2, data, size) == JDR_OK;
+}
+
+bool pushTextLine(std::uint32_t start) {
+    if (textLineCount == textCapacity) {
+        const int capacity = textCapacity > 0 ? textCapacity * 2 : 4096;
+        void* p = heap_caps_realloc(textStarts, static_cast<std::size_t>(capacity) * sizeof(std::uint32_t),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (p == nullptr) {
+            return false;
+        }
+        textStarts = static_cast<std::uint32_t*>(p);
+        textCapacity = capacity;
+    }
+    textStarts[textLineCount++] = start;
+    return true;
+}
+
+// Word-wraps the whole text once (about 0.5 s per MB); lines are kept as byte offsets.
+void layoutText(const char* data, std::size_t size) {
+    textBase = data;
+    textSize = size;
+    textLineCount = 0;
+    textTop = 0;
+    const char* p = data;
+    const char* end = data + size;
+    if (size >= 3 && static_cast<std::uint8_t>(p[0]) == 0xEF && static_cast<std::uint8_t>(p[1]) == 0xBB
+        && static_cast<std::uint8_t>(p[2]) == 0xBF) {
+        p += 3;                          // UTF-8 BOM
+    }
+    std::uint32_t lineStart = static_cast<std::uint32_t>(p - data);
+    int width = 0;
+    while (p < end) {
+        const char* at = p;
+        const std::uint32_t code = textfont::decode(p, end);
+        if (code == '\n') {
+            if (!pushTextLine(lineStart)) {
+                return;
+            }
+            lineStart = static_cast<std::uint32_t>(p - data);
+            width = 0;
+            continue;
+        }
+        if (code == '\r') {
+            continue;
+        }
+        const int adv = textfont::advance(code == '\t' ? ' ' : code);
+        if (width > 0 && width + adv > kTextW) {
+            if (!pushTextLine(lineStart)) {
+                return;
+            }
+            lineStart = static_cast<std::uint32_t>(at - data);
+            width = 0;
+        }
+        width += adv;
+    }
+    if (lineStart < size || textLineCount == 0) {
+        pushTextLine(lineStart);
+    }
+}
+
+void drawTextLine(int index, int y) {
+    if (index < 0 || index >= textLineCount || textBase == nullptr) {
+        return;
+    }
+    const std::uint32_t from = textStarts[index];
+    const std::uint32_t to = index + 1 < textLineCount ? textStarts[index + 1] : static_cast<std::uint32_t>(textSize);
+    char buffer[512];
+    std::size_t n = 0;
+    for (std::uint32_t i = from; i < to && n + 1 < sizeof(buffer); ++i) {
+        const char c = textBase[i];
+        if (c != '\n' && c != '\r') {
+            buffer[n++] = c;
+        }
+    }
+    buffer[n] = '\0';
+    drawUtf8(kTextX, y, kTextW, buffer, kFg, kBg);
+}
+
+void openShared(std::uint16_t id) {
+    share::Item it;
+    shareNote = "";
+    if (!share::find(id, it)) {
+        shareView = ShareView::List;
+        return;
+    }
+    shareId = id;
+    shareSel = share::indexOf(id);
+    if (it.kind == share::Kind::Image) {
+        shareView = ShareView::Image;
+        return;
+    }
+    const std::uint8_t* data = nullptr;
+    std::size_t size = 0;
+    if (share::load(id, data, size)) {
+        layoutText(reinterpret_cast<const char*>(data), size);
+        shareView = ShareView::Text;
+    } else {
+        shareView = ShareView::List;
+        shareNote = tr("读取失败", "Cannot read the file");
+    }
+}
+
+void renderShareList() {
+    const int n = share::count();
+    shareSel = std::max(0, std::min(shareSel, n - 1));
+    if (shareSel < shareTop) {
+        shareTop = shareSel;
+    } else if (shareSel >= shareTop + kShareRows) {
+        shareTop = shareSel - kShareRows + 1;
+    }
+    if (shareDelConfirm && static_cast<std::int32_t>(millis() - shareDelUntil) >= 0) {
+        shareDelConfirm = false;
+    }
+    const std::uint32_t key = share::revision() * 4096U + static_cast<std::uint32_t>(shareSel) * 64U
+        + static_cast<std::uint32_t>(shareTop) + (shareDelConfirm ? 0x80000000U : 0U);
+    if (!changed(0, shareNote, key)) {
+        return;
+    }
+    gfx->fillRect(0, kBar + 1, kWidth, kHeight - kBar - 1, kBg);
+    if (n == 0) {
+        text(tr("还没有分享的文件", "Nothing shared yet"), kWidth / 2, 78, Font::Large, kFg, kBg, 0, TC_DATUM, 2, false);
+        text(tr("电脑：上位机「分享到屏幕」", "PC: host app, Share page"), kWidth / 2, 122, Font::Small, kDim, kBg, 0, TC_DATUM,
+            2, false);
+        text(tr("手机：网页「分享到屏幕」", "Phone: web page, Share card"), kWidth / 2, 146, Font::Small, kDim, kBg, 0,
+            TC_DATUM, 2, false);
+        text(tr("图片（自动缩小）或 txt 文本", "Pictures (resized) or .txt"), kWidth / 2, 176, Font::Small, kDim, kBg, 0,
+            TC_DATUM, 2, false);
+        return;
+    }
+    for (int row = 0; row < kShareRows; ++row) {
+        share::Item it;
+        const int i = shareTop + row;
+        if (!share::item(i, it)) {
+            break;
+        }
+        const int y = kShareRowY + row * kShareRowH;
+        const bool selected = i == shareSel;
+        const std::uint16_t face = selected ? kButton : kCard;
+        panel(8, y, 304, kShareRowH - 4, 8, face);
+        if (selected) {
+            gfx->fillRoundRect(10, y + 7, 3, kShareRowH - 18, 1, kAccent);
+        }
+        shareIcon(it.kind, 28, y + 16, it.kind == share::Kind::Image ? rgb(0xF472B6) : kInfo);
+        drawUtf8(44, y + 6, 200, textfont::fit(it.name.c_str(), 196).c_str(), kFg, face);
+        text(bytesShort(it.size), 302, y + 17, Font::Small, kDim, face, 0, MR_DATUM, 2, false);
+    }
+    const String footer = shareNote.length() > 0 ? shareNote
+        : String(tr("共 ", "")) + n + tr(" 个 · 剩 ", " files · free ") + bytesShort(share::freeBytes());
+    text(footer, 12, 214, Font::Small, shareNote.length() > 0 ? kWarn : kDim, kBg, 0, TL_DATUM, 2, false);
+    panel(kShareDelete.x, kShareDelete.y, kShareDelete.w, kShareDelete.h, 10, shareDelConfirm ? kOffColor : kButton);
+    text(shareDelConfirm ? tr("再点删除", "Again") : tr("删除", "Delete"), kShareDelete.x + kShareDelete.w / 2,
+        kShareDelete.y + kShareDelete.h / 2 + 1, Font::Small, shareDelConfirm ? kWhite : kFg,
+        shareDelConfirm ? kOffColor : kButton, 0, MC_DATUM, 2, false);
+}
+
+void renderShareImage() {
+    if (!changed(0, "img", shareId)) {
+        return;
+    }
+    const std::uint8_t* data = nullptr;
+    std::size_t size = 0;
+    if (share::load(shareId, data, size) && drawJpeg(data, size)) {
+        return;
+    }
+    gfx->fillRect(0, 0, kWidth, kHeight, kBg);
+    text(tr("这张图片打不开", "Cannot show this picture"), kWidth / 2, 96, Font::Large, kWarn, kBg, 0, TC_DATUM, 2, false);
+    text(tr("只支持普通 JPEG（上位机 / 网页会自动转换）", "Baseline JPEG only"), kWidth / 2, 136, Font::Small, kDim, kBg,
+        0, TC_DATUM, 2, false);
+    text(tr("点屏幕返回", "Tap to go back"), kWidth / 2, 166, Font::Small, kDim, kBg, 0, TC_DATUM, 2, false);
+}
+
+void renderShareText() {
+    textTop = std::max(0, std::min(textTop, std::max(0, textLineCount - kTextLines)));
+    if (!changed(0, "txt", static_cast<std::uint32_t>(shareId) * 1048576U + static_cast<std::uint32_t>(textTop))) {
+        return;
+    }
+    gfx->fillRect(0, kBar + 1, kWidth, kHeight - kBar - 1, kBg);
+    for (int i = 0; i < kTextLines; ++i) {
+        drawTextLine(textTop + i, 30 + i * 20);
+    }
+    gfx->drawFastHLine(8, 212, 304, kBorder);
+    share::Item it;
+    if (share::find(shareId, it)) {
+        drawUtf8(10, 216, 200, textfont::fit(it.name.c_str(), 196).c_str(), kDim, kBg);
+    }
+    const int pages = std::max(1, (textLineCount + kTextLines - 1) / kTextLines);
+    const int pageNow = std::min(pages, textTop / kTextLines + 1);
+    text(String(pageNow) + " / " + pages, 310, 226, Font::Small, kDim, kBg, 0, MR_DATUM, 2, false);
+}
+
+void renderShare() {
+    if (shareView != ShareView::List && share::indexOf(shareId) < 0) {
+        shareView = ShareView::List;       // deleted (FILEDEL) while shown
+    }
+    switch (shareView) {
+        case ShareView::Image: renderShareImage(); break;
+        case ShareView::Text: renderShareText(); break;
+        default: renderShareList(); break;
+    }
+}
+
+void shareBackToList() {
+    shareView = ShareView::List;
+    clearContent();
+    dirty = true;
+}
+
+void shareStep(int steps) {
+    if (shareView == ShareView::Text) {
+        textTop += steps * kTextLines;
+        return;
+    }
+    const int n = share::count();
+    if (n == 0) {
+        return;
+    }
+    const int next = std::max(0, std::min(n - 1, shareSel + steps));
+    if (shareView == ShareView::List) {
+        shareSel = next;
+        return;
+    }
+    share::Item it;
+    if (next != shareSel && share::item(next, it)) {   // picture viewer: knob = previous / next file
+        openShared(it.id);
+        clearContent();
+    }
+}
+
+Tap shareTouch(int x, int y) {
+    if (shareView == ShareView::Image) {
+        shareBackToList();
+        return Tap::Done;
+    }
+    if (y < kBar) {
+        return Tap::None;
+    }
+    if (shareView == ShareView::Text) {
+        textTop += (y < (kBar + kHeight) / 2 ? -1 : 1) * kTextLines;
+        return Tap::Repeat;
+    }
+    if (kShareDelete.contains(x, y)) {
+        share::Item it;
+        if (shareDelConfirm && share::item(shareSel, it)) {
+            share::remove(it.id);
+            shareDelConfirm = false;
+        } else if (share::count() > 0) {
+            shareDelConfirm = true;
+            shareDelUntil = millis() + 3000;
+        }
+        return Tap::Done;
+    }
+    for (int row = 0; row < kShareRows; ++row) {
+        const int top = kShareRowY + row * kShareRowH;
+        share::Item it;
+        if (y >= top && y < top + kShareRowH && share::item(shareTop + row, it)) {
+            openShared(it.id);
+            clearContent();
+            return Tap::Done;
+        }
+    }
+    return Tap::None;
+}
+
+void sharePress() {
+    if (shareView != ShareView::List) {
+        shareBackToList();
+        return;
+    }
+    share::Item it;
+    if (share::item(shareSel, it)) {
+        openShared(it.id);
+        clearContent();
+    }
+}
+
 // ------------------------------------------------------------ page switching / dispatch
 void clearContent() {
     useFont(Font::Builtin);
@@ -2698,6 +3065,15 @@ void enterPage(Page page) {
     }
     if (page == Page::Game) {
         game::begin();
+    }
+    if (page == Page::Share) {
+        shareDelConfirm = false;
+        if (shareOpenPending >= 0) {
+            openShared(static_cast<std::uint16_t>(shareOpenPending));   // a file that just arrived
+            shareOpenPending = -1;
+        } else {
+            shareView = ShareView::List;
+        }
     }
 
     currentPage = page;
@@ -2733,7 +3109,9 @@ void renderPage() {
     if (currentPage == Page::TouchCal) {
         return;
     }
-    drawStatusBar();
+    if (!(currentPage == Page::Share && shareView == ShareView::Image && !bannerShown)) {
+        drawStatusBar();     // a shared picture uses the whole screen
+    }
     if (bannerShown) {
         return;              // page frozen under the banner
     }
@@ -2757,6 +3135,7 @@ void renderPage() {
         case Page::Remote: renderRemote(); break;
         case Page::Game: renderGame(); break;
         case Page::System: renderSystem(); break;
+        case Page::Share: renderShare(); break;
         default: break;
     }
 }
@@ -2771,6 +3150,9 @@ Tap onTouch(int x, int y) {
             hideBanner();
         }
         return Tap::Done;
+    }
+    if (currentPage == Page::Share && shareView == ShareView::Image) {
+        return shareTouch(x, y);         // full-screen picture: any tap goes back to the list
     }
     if (currentPage != Page::Menu && y < kBar && x < 80) {
         goHome();
@@ -2853,6 +3235,9 @@ Tap onTouch(int x, int y) {
                 return Tap::Done;
             }
             break;
+
+        case Page::Share:
+            return shareTouch(x, y);
 
         case Page::Menu:
             for (int i = 0; i < kHomeCount; ++i) {
@@ -3171,6 +3556,10 @@ void onRotate(int steps) {
             }
             break;
 
+        case Page::Share:
+            shareStep(steps);
+            break;
+
         case Page::Pomodoro:
             if (timerMode == 0 && !pomoRunning && !pomoPaused) {
                 pomoDone = false;
@@ -3255,6 +3644,9 @@ void onShortPress() {
             break;
         case Page::System:
             sysClean();
+            break;
+        case Page::Share:
+            sharePress();
             break;
         case Page::TouchCal:
             config.touchSkipped = true;
@@ -3433,6 +3825,22 @@ void loop() {
             present();
         }
         return;
+    }
+
+    // A picture / text file just arrived (or FILEOPEN): show it, from any page.
+    const int arrivedId = share::takeArrived();
+    if (arrivedId >= 0) {
+        if (bannerShown) {
+            bannerShown = false;
+        }
+        if (currentPage == Page::Share) {
+            openShared(static_cast<std::uint16_t>(arrivedId));
+            clearContent();
+            dirty = true;
+        } else {
+            shareOpenPending = arrivedId;
+            setPage(Page::Share);
+        }
     }
 
     checkNewMessage(now);

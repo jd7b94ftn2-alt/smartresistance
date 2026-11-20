@@ -175,6 +175,33 @@ String fit(const char* utf8, int maxWidth) {
     return out;
 }
 
+std::uint32_t decode(const char*& p, const char* end) {
+    if (p >= end) {
+        return 0;
+    }
+    const std::uint8_t b = static_cast<std::uint8_t>(*p++);
+    if (b < 0x80) {
+        return b;
+    }
+    int extra = (b & 0xE0) == 0xC0 ? 1 : (b & 0xF0) == 0xE0 ? 2 : (b & 0xF8) == 0xF0 ? 3 : -1;
+    if (extra < 0) {
+        return 0xFFFD;
+    }
+    std::uint32_t code = b & (extra == 1 ? 0x1F : extra == 2 ? 0x0F : 0x07);
+    for (int i = 0; i < extra; ++i) {
+        if (p >= end || (static_cast<std::uint8_t>(*p) & 0xC0) != 0x80) {
+            return 0xFFFD;
+        }
+        code = (code << 6) | (static_cast<std::uint8_t>(*p++) & 0x3F);
+    }
+    return code;
+}
+
+int advance(std::uint32_t code) {
+    Glyph g;
+    return glyphFor(code, g) ? g.advance : 0;
+}
+
 int draw2bpp(std::uint8_t* bitmap, int w, int h, int x, int y, const char* utf8, int level, int maxX) {
     const int stride = (w + 3) / 4;
     maxX = std::min(maxX, w);
