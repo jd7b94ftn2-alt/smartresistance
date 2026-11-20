@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 
+#include "apple.h"
 #include "messages.h"
 #include "textfont.h"
 
@@ -142,9 +143,10 @@ int onWritten(std::uint16_t conn, const ble_gatt_error* error, ble_gatt_attr* at
     return 0;
 }
 
-// Asks for title / message / date of the oldest queued notification.
+// Asks for title / message / date of the oldest queued notification. Waits while apple.cpp sets up
+// AMS / CTS on the same link (one GATT procedure at a time); it calls back when done.
 void requestNext() {
-    if (busy || uidCount == 0 || !linkReady) {
+    if (busy || uidCount == 0 || !linkReady || apple::busy()) {
         return;
     }
     const std::uint32_t uid = uidQueue[uidHead];
@@ -272,6 +274,13 @@ bool parseResponse() {
 // ---- discovery ----
 int onCccdWritten(std::uint16_t conn, const ble_gatt_error* error, ble_gatt_attr* attr, void* arg);
 
+// ANCS set-up finished (or failed after the service was found): now media + time on the same link.
+void startApple() {
+    if (peer.conn != kNone) {
+        apple::start(peer.conn, requestNext);
+    }
+}
+
 void subscribe(std::uint16_t cccd) {
     static const std::uint8_t kNotify[2] = {0x01, 0x00};
     if (ble_gattc_write_flat(peer.conn, cccd, kNotify, sizeof(kNotify), onCccdWritten, nullptr) != 0) {
@@ -288,6 +297,7 @@ int onCccdWritten(std::uint16_t conn, const ble_gatt_error* error, ble_gatt_attr
     if (error->status != 0) {
         setError(error->status == BLE_HS_ATT_ERR(BLE_ATT_ERR_INSUFFICIENT_AUTHEN) ? "not authorised on iPhone"
                                                                                 : "subscribe rejected");
+        startApple();
         return 0;
     }
     if (attr != nullptr && attr->handle == peer.dsCccd) {
@@ -296,6 +306,7 @@ int onCccdWritten(std::uint16_t conn, const ble_gatt_error* error, ble_gatt_attr
         peer.subscribed = true;
         linkReady = true;
         setError("");
+        startApple();
     }
     return 0;
 }
@@ -314,6 +325,7 @@ int onDescriptor(std::uint16_t conn, const ble_gatt_error* error, std::uint16_t 
     }
     if (error->status != BLE_HS_EDONE) {
         setError("descriptor discovery failed");
+        startApple();
         return 0;
     }
     if (which == 0) {
@@ -358,10 +370,12 @@ int onCharacteristic(std::uint16_t conn, const ble_gatt_error* error, const ble_
     }
     if (error->status != BLE_HS_EDONE) {
         setError("characteristic discovery failed");
+        startApple();
         return 0;
     }
     if (peer.ns == 0 || peer.cp == 0 || peer.ds == 0) {
         setError("ANCS characteristics missing");
+        startApple();
         return 0;
     }
     const std::uint16_t end = peer.nextDef[0] ? peer.nextDef[0] - 1 : peer.end;
@@ -423,6 +437,9 @@ int gapEvent(ble_gap_event* event, void* arg) {
             if (event->notify_rx.conn_handle != peer.conn || event->notify_rx.om == nullptr) {
                 break;
             }
+            if (apple::onNotify(event->notify_rx.conn_handle, event->notify_rx.attr_handle, event->notify_rx.om)) {
+                break;                                // AMS now-playing data
+            }
             const int length = OS_MBUF_PKTLEN(event->notify_rx.om);
             if (event->notify_rx.attr_handle == peer.ns) {
                 std::uint8_t data[8];
@@ -442,6 +459,7 @@ int gapEvent(ble_gap_event* event, void* arg) {
             break;
         }
         case BLE_GAP_EVENT_DISCONNECT:
+            apple::disconnected(event->disconnect.conn.conn_handle);
             if (event->disconnect.conn.conn_handle == peer.conn) {
                 resetPeer();
             }
@@ -504,9 +522,11 @@ void begin() {
         items = xQueueCreate(4, sizeof(Item));
     }
     NimBLEDevice::setCustomGapHandler(gapEvent);
+    apple::begin();
 }
 
 void loop() {
+    apple::loop();
     if (busy && millis() - busySinceMs > 4000) {      // the phone never answered: move on
         busy = false;
         setError("no answer from iPhone");

@@ -14,6 +14,7 @@
 #include <cstring>
 
 #include "ancs.h"
+#include "apple.h"
 #include "application_controller.h"
 #include "board_pins.h"
 #include "comm.h"
@@ -340,6 +341,7 @@ const char* const kHelpText =
     "IMGNEW <slot> <w> <h> | IMGDAT <slot> <off> <b64> | IMGEND <slot> | IMGCLR <slot>\n"
     "SYS <cpu> <ram> <down> <up> | PLAY <0|1> | CI <0..3> [HH:MM] | MACRO <0..5> <action> | MACRO?\n"
     "USBMODE <PC|PBANK> | USBMODE? | PB? | PBLOG? | SHOT [row] [rows] | STATE?\n"
+    "WXLOC <lat> <lon> [city] | WXLOC? | WXLOC OFF | IPHONE?\n"
     "HID? | ANCS? | MEM? | CLEAN | REMOTE <VOLUP|VOLDOWN|PLAY|NEXT|PREV|SHUTTER|MUTE|UP|DOWN|HOME> | UNPAIR\n"
     "GAME? | GAME <NEW|LEFT|RIGHT|ROT|DROP|PAUSE|RESUME>\n"
     "PAGE <0..19> | ROT <1|3> | BL <0..100> | LOCK <0|1> | CLEAR | *IDN? | REBOOT";
@@ -910,8 +912,11 @@ String handleCommand(const String& rawLine) {
         return msg::handleCommand(cmd, tokens, count);
     }
     if (cmd == "SYS" || cmd == "PLAY" || cmd == "CI" || cmd == "MACRO" || cmd == "MACRO?" || cmd == "TIME"
-        || cmd == "WX") {
+        || cmd == "WX" || cmd == "WXLOC" || cmd == "WXLOC?") {
         return desk::handleCommand(cmd, tokens, count);
+    }
+    if (cmd == "IPHONE?") {
+        return apple::status();
     }
 
     if (cmd == "R") {

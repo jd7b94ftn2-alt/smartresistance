@@ -39,7 +39,11 @@ void begin();
 // Handles every command starting with "MSG" or "IMG"; `cmd` is tokens[0] upper-cased.
 String handleCommand(const String& cmd, const String* tokens, int count);
 bool image(int slot, Message& out);    // false when the slot is empty
-std::uint32_t imageRevision();
+std::uint32_t imageRevision();         // any slot changed
+std::uint32_t imageStamp(int slot);    // this slot changed (unique across slots, 0 = never)
+// Board-rendered images (iPhone now playing, the board's own weather line); same 2-bit format.
+bool setImage(int slot, int width, int height, const std::uint8_t* pixels);
+void clearImage(int slot);
 
 int count();
 int unread();

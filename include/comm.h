@@ -33,6 +33,7 @@ String accessPointName();
 bool timeValid();
 String weatherLine();                // last fetched text, empty until the first success
 void requestWeather();               // fetched in loop() while connected, at most every 15 min
+void requestWeatherNow();            // the location changed: fetch on the next chance
 
 // ---- MQTT (internet remote control) ----
 void restartMqtt();                  // applies app::settings() broker settings

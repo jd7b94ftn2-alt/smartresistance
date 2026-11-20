@@ -105,6 +105,13 @@ pre{background:var(--inset);border-radius:12px;padding:10px;margin:10px 0 0;font
 </div>
 
 <div class="card">
+  <h2><span>时间与天气</span><span id="wxState"></span></h2>
+  <div class="sub" id="wxInfo">连上后自动把手机时间同步给板子；天气由手机联网获取后发给板子（不需要电脑）</div>
+  <div class="row"><input id="city" type="text" placeholder="城市，例如 深圳" autocomplete="off" enterkeyhint="search"><button onclick="setCity()">同步天气</button></div>
+  <div class="row"><button onclick="askCity()">输入城市…</button><button onclick="locate()">用手机定位</button></div>
+</div>
+
+<div class="card">
   <h2><span>指令</span><span></span></h2>
   <div class="row" style="margin-top:0"><input id="cin" type="text" placeholder="例如 HELP、STAT?、R 4.7k" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" enterkeyhint="send"><button onclick="sendCin()">发送</button></div>
   <div class="quick"><button onclick="cmd('STAT?')">STAT?</button><button onclick="cmd('TEMP?')">TEMP?</button><button onclick="cmd('PB?')">PB?</button><button onclick="cmd('HID?')">HID?</button><button onclick="cmd('ANCS?')">ANCS?</button><button onclick="cmd('MEM?')">MEM?</button><button onclick="cmd('HELP')">HELP</button></div>
@@ -274,6 +281,70 @@ async function poll() {
   polling = false;
 }
 
+// ---- time + weather from the phone (works without the PC host) ----
+// Time: the phone clock. Weather: open-meteo fetched by the phone (needs the phone's internet),
+// sent as WX; WXLOC saves the place on the board, which then also fetches by itself on a Wi-Fi with internet.
+const WMO = {0: "晴", 1: "晴间多云", 2: "多云", 3: "阴", 45: "雾", 48: "雾", 61: "小雨", 63: "中雨", 65: "大雨", 71: "小雪", 73: "中雪", 75: "大雪", 80: "阵雨", 81: "阵雨", 82: "阵雨", 95: "雷阵雨"};
+let place = null, wxTimer = 0;
+function wxInfo(text, cls) { $("wxInfo").textContent = text; $("wxState").textContent = cls || ""; }
+function loadPlace() { try { return JSON.parse(localStorage.getItem("smartr.place") || "null"); } catch (e) { return null; } }
+function savePlace(p) { try { localStorage.setItem("smartr.place", JSON.stringify(p)); } catch (e) {} }
+async function syncTime() {
+  const now = new Date();
+  await link.cmd("TIME " + Math.floor(now.getTime() / 1000) + " " + (-now.getTimezoneOffset()));
+}
+async function syncWeather() {
+  if (!place) { wxInfo("还没设置城市：输入城市或用手机定位"); return; }
+  try {
+    const q = new URLSearchParams({latitude: place.lat, longitude: place.lon, timezone: "auto", forecast_days: 1,
+      current: "temperature_2m,relative_humidity_2m,weather_code", daily: "temperature_2m_max,temperature_2m_min"});
+    const w = await (await fetch("https://api.open-meteo.com/v1/forecast?" + q)).json();
+    const c = w.current, d = w.daily;
+    const code = c.weather_code, t = c.temperature_2m, hum = Math.round(c.relative_humidity_2m);
+    const lo = Math.round(d.temperature_2m_min[0]), hi = Math.round(d.temperature_2m_max[0]);
+    await link.cmd(`WX ${code} ${Math.round(t * 10)} ${lo} ${hi} ${hum}`);
+    await link.cmd(`WXLOC ${place.lat.toFixed(4)} ${place.lon.toFixed(4)} ${place.name}`);
+    wxInfo(`${place.name}  ${WMO[code] || "天气 " + code}  ${t.toFixed(1)}°C  ${lo}~${hi}°C  湿度 ${hum}%  · ${new Date().toLocaleTimeString().slice(0, 5)} 已发给板子`, "已同步");
+  } catch (e) { wxInfo("获取天气失败（手机要能上网）：" + e.message, "失败"); }
+}
+async function findCity(name) {
+  name = (name || "").trim();
+  if (!name) return;
+  try {
+    const q = new URLSearchParams({name, count: 1, language: "zh", format: "json"});
+    const r = await (await fetch("https://geocoding-api.open-meteo.com/v1/search?" + q)).json();
+    const h = (r.results || [])[0];
+    if (!h) { wxInfo("没找到这个城市：" + name, "失败"); return; }
+    place = {name: h.name, lat: h.latitude, lon: h.longitude};
+    savePlace(place);
+    syncWeather();
+  } catch (e) { wxInfo("查城市失败（手机要能上网）：" + e.message, "失败"); }
+}
+function setCity() { findCity($("city").value); }
+function askCity() { const n = window.prompt("城市（例如 深圳）", place ? place.name : ""); if (n) findCity(n); }
+function locate() {
+  if (!navigator.geolocation) { wxInfo("这个浏览器不能定位，请输入城市"); return; }
+  wxInfo("定位中…");
+  navigator.geolocation.getCurrentPosition(p => {
+    place = {name: "当前位置", lat: p.coords.latitude, lon: p.coords.longitude};
+    savePlace(place);
+    syncWeather();
+  }, e => wxInfo("定位失败（" + e.message + "），请输入城市", "失败"), {timeout: 10000, maximumAge: 600000});
+}
+$("city").addEventListener("keydown", e => { if (e.key === "Enter") setCity(); });
+async function syncPhone() {
+  try { await syncTime(); } catch (e) {}
+  if (!place) {                                  // the board may know the place already (PC host / earlier phone)
+    try {
+      const r = (await link.cmd("WXLOC?")).split(" ");
+      if (r[0] === "WXLOC" && r.length >= 3 && r[1] !== "OFF") {
+        place = {lat: parseFloat(r[1]), lon: parseFloat(r[2]), name: r.slice(3).join(" ") || "板子保存的位置"};
+      }
+    } catch (e) {}
+  }
+  if (place) syncWeather(); else wxInfo("时间已同步。天气：输入城市或用手机定位");
+}
+
 let timer = 0;
 function start(l) {
   link = l;
@@ -283,6 +354,11 @@ function start(l) {
   poll();
   clearInterval(timer);
   timer = setInterval(poll, l === httpLink ? 1000 : 1500);
+  place = loadPlace();
+  if (place) $("city").value = place.name;
+  syncPhone();
+  clearInterval(wxTimer);
+  wxTimer = setInterval(syncPhone, 30 * 60 * 1000);
 }
 
 if (location.protocol === "http:" && (location.hostname !== "localhost" || location.search.includes("http"))) {

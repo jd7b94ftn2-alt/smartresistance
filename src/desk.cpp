@@ -1,16 +1,60 @@
 #include "desk.h"
 
+#include <HTTPClient.h>
 #include <Preferences.h>
 #include <sys/time.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 
 #include "app.h"
+#include "messages.h"
+#include "textfont.h"
 
 namespace desk {
 namespace {
+
+long offsetMinutes = 480;              // UTC+8 until something tells otherwise
+Location place;
+
+void applyZone(long minutes) {
+    char tz[20];
+    // POSIX TZ has the sign reversed: UTC+8 is "UTC-08:00".
+    snprintf(tz, sizeof(tz), "UTC%c%02ld:%02ld", minutes >= 0 ? '-' : '+', labs(minutes) / 60, labs(minutes) % 60);
+    setenv("TZ", tz, 1);
+    tzset();
+}
+
+void saveOffset(long minutes) {
+    if (minutes == offsetMinutes) {
+        return;
+    }
+    offsetMinutes = minutes;
+    Preferences prefs;
+    prefs.begin("desk", false);
+    prefs.putInt("tzm", static_cast<std::int32_t>(minutes));
+    prefs.end();
+}
+
+void savePlace() {
+    Preferences prefs;
+    prefs.begin("desk", false);
+    if (place.valid) {
+        prefs.putFloat("wxlat", place.lat);
+        prefs.putFloat("wxlon", place.lon);
+        prefs.putString("wxcity", place.city);
+    } else {
+        prefs.remove("wxlat");
+        prefs.remove("wxlon");
+        prefs.remove("wxcity");
+    }
+    prefs.end();
+}
+
+void renderDetail();
 
 constexpr std::uint32_t kSysTimeoutMs = 8000;
 const comm::Action kDefaultMacros[kMacroCount] = {
@@ -50,7 +94,122 @@ void saveMacros() {
     prefs.end();
 }
 
+// City line under the weather on the clock page (image slot 1), drawn with the board's text font:
+// "<city> · <low>~<high>°C · 湿度 <n>%". Used when the weather comes from the phone or the board itself.
+void renderDetail() {
+    if (!weatherData.valid || !textfont::ready()) {
+        return;
+    }
+    const bool en = app::settings().language == 1;
+    String line;
+    if (place.valid && place.city.length() > 0) {
+        line = place.city + " · ";
+    }
+    line += String(weatherData.low) + "~" + String(weatherData.high) + "°C · " + (en ? "RH " : "湿度 ")
+        + String(weatherData.humidity) + "%";
+    constexpr int kW = 224;
+    constexpr int kH = 20;
+    static std::uint8_t bitmap[((kW + 3) / 4) * kH];
+    memset(bitmap, 0, sizeof(bitmap));
+    textfont::draw2bpp(bitmap, kW, kH, 0, 0, textfont::fit(line.c_str(), kW).c_str(), 2, kW);
+    msg::setImage(1, kW, kH, bitmap);
+}
+
+void storeWeather(int code, float temp, int low, int high, int humidity) {
+    weatherData.valid = true;
+    weatherData.code = code;
+    weatherData.temp = temp;
+    weatherData.low = low;
+    weatherData.high = high;
+    weatherData.humidity = humidity;
+    weatherMs = millis();
+    ++rev;
+}
+
+bool numberAfter(const String& body, int from, const char* key, float& out) {
+    if (from < 0) {
+        return false;
+    }
+    const int at = body.indexOf(key, from);
+    if (at < 0) {
+        return false;
+    }
+    const char* p = body.c_str() + at + strlen(key);
+    while (*p == ' ' || *p == ':' || *p == '[') {
+        ++p;
+    }
+    char* end = nullptr;
+    out = strtof(p, &end);
+    return end != p;
+}
+
 }  // namespace
+
+void setTime(long long unixSeconds, long utcOffsetMinutes) {
+    timeval tv = {static_cast<time_t>(unixSeconds), 0};
+    settimeofday(&tv, nullptr);
+    applyZone(utcOffsetMinutes);
+    saveOffset(utcOffsetMinutes);
+}
+
+long utcOffsetMinutes() {
+    return offsetMinutes;
+}
+
+void setPlaying(bool playing) {
+    if (playingNow != playing) {
+        playingNow = playing;
+        ++rev;
+    }
+}
+
+Location location() {
+    return place;
+}
+
+bool fetchWeather() {
+    if (!place.valid) {
+        return false;
+    }
+    char url[300];
+    snprintf(url, sizeof(url),
+        "http://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
+        "&current=temperature_2m,relative_humidity_2m,weather_code"
+        "&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=1",
+        place.lat, place.lon);
+    HTTPClient http;
+    http.setConnectTimeout(3000);
+    http.setTimeout(4000);
+    if (!http.begin(url)) {
+        return false;
+    }
+    const int status = http.GET();
+    const String body = status == HTTP_CODE_OK ? http.getString() : String();
+    http.end();
+    const int current = body.indexOf("\"current\":{");
+    const int daily = body.indexOf("\"daily\":{");
+    float temp = 0;
+    float humidity = 0;
+    float code = 0;
+    float high = 0;
+    float low = 0;
+    if (!numberAfter(body, current, "\"temperature_2m\"", temp) || !numberAfter(body, current, "\"weather_code\"", code)
+        || !numberAfter(body, current, "\"relative_humidity_2m\"", humidity)
+        || !numberAfter(body, daily, "\"temperature_2m_max\"", high) || !numberAfter(body, daily, "\"temperature_2m_min\"", low)) {
+        return false;
+    }
+    float offset = 0;
+    if (numberAfter(body, 0, "\"utc_offset_seconds\"", offset)) {
+        const long minutes = lroundf(offset / 60.0f);
+        if (minutes != offsetMinutes) {
+            applyZone(minutes);
+            saveOffset(minutes);
+        }
+    }
+    storeWeather(static_cast<int>(code), temp, lroundf(low), lroundf(high), lroundf(humidity));
+    renderDetail();
+    return true;
+}
 
 void begin() {
     for (int i = 0; i < kMacroCount; ++i) {
@@ -58,6 +217,14 @@ void begin() {
     }
     Preferences prefs;
     prefs.begin("desk", true);
+    offsetMinutes = prefs.getInt("tzm", 480);
+    applyZone(offsetMinutes);
+    if (prefs.isKey("wxlat")) {
+        place.valid = true;
+        place.lat = prefs.getFloat("wxlat", 0);
+        place.lon = prefs.getFloat("wxlon", 0);
+        place.city = prefs.getString("wxcity", "");
+    }
     std::uint8_t raw[kMacroCount];
     if (prefs.getBytes("macro", raw, sizeof(raw)) == sizeof(raw)) {
         for (int i = 0; i < kMacroCount; ++i) {
@@ -91,38 +258,68 @@ String handleCommand(const String& cmd, const String* tokens, int count) {
         if (count < 3 || !toUint(tokens[1], a)) {
             return "ERR TIME <unix> <utc offset minutes>";
         }
-        const long offset = strtol(tokens[2].c_str(), nullptr, 10);
-        timeval tv = {static_cast<time_t>(a), 0};
-        settimeofday(&tv, nullptr);
-        char tz[20];
-        // POSIX TZ has the sign reversed: UTC+8 is "UTC-08:00".
-        snprintf(tz, sizeof(tz), "UTC%c%02ld:%02ld", offset >= 0 ? '-' : '+', labs(offset) / 60, labs(offset) % 60);
-        setenv("TZ", tz, 1);
-        tzset();
+        setTime(static_cast<long long>(a), strtol(tokens[2].c_str(), nullptr, 10));
         return "";
     }
     if (cmd == "WX") {
         if (count < 6) {
             return "ERR WX <code> <temp x10> <min> <max> <humidity>";
         }
-        weatherData.valid = true;
-        weatherData.code = static_cast<int>(strtol(tokens[1].c_str(), nullptr, 10));
-        weatherData.temp = strtol(tokens[2].c_str(), nullptr, 10) / 10.0f;
-        weatherData.low = static_cast<int>(strtol(tokens[3].c_str(), nullptr, 10));
-        weatherData.high = static_cast<int>(strtol(tokens[4].c_str(), nullptr, 10));
-        weatherData.humidity = static_cast<int>(strtol(tokens[5].c_str(), nullptr, 10));
-        weatherMs = millis();
-        ++rev;
+        storeWeather(static_cast<int>(strtol(tokens[1].c_str(), nullptr, 10)), strtol(tokens[2].c_str(), nullptr, 10) / 10.0f,
+            static_cast<int>(strtol(tokens[3].c_str(), nullptr, 10)), static_cast<int>(strtol(tokens[4].c_str(), nullptr, 10)),
+            static_cast<int>(strtol(tokens[5].c_str(), nullptr, 10)));
+        if (place.valid) {
+            renderDetail();          // city line; the PC host replaces it with its own IMG slot 1 right after
+        }
         return "";
+    }
+    if (cmd == "WXLOC?") {
+        if (!place.valid) {
+            return "WXLOC OFF";
+        }
+        return String("WXLOC ") + String(place.lat, 4) + " " + String(place.lon, 4) + " " + place.city;
+    }
+    if (cmd == "WXLOC") {
+        if (count >= 2 && tokens[1].equalsIgnoreCase("OFF")) {
+            place = Location();
+            savePlace();
+            return "OK";
+        }
+        if (count < 3) {
+            return "ERR WXLOC <lat> <lon> [city] | WXLOC OFF";
+        }
+        const float lat = tokens[1].toFloat();
+        const float lon = tokens[2].toFloat();
+        if (lat < -90 || lat > 90 || lon < -180 || lon > 180 || (lat == 0 && lon == 0)) {
+            return "ERR lat -90..90, lon -180..180";
+        }
+        String city;
+        for (int i = 3; i < count; ++i) {      // the tokenizer splits on spaces; a city may have some
+            if (i > 3) {
+                city += " ";
+            }
+            city += tokens[i];
+        }
+        if (city.length() > 40) {
+            city = city.substring(0, 40);
+        }
+        const bool same = place.valid && fabsf(place.lat - lat) < 1e-4f && fabsf(place.lon - lon) < 1e-4f && place.city == city;
+        if (!same) {                           // the PC / phone resend it often: write NVS only on a change
+            place.valid = true;
+            place.lat = lat;
+            place.lon = lon;
+            place.city = city;
+            savePlace();
+            comm::requestWeatherNow();
+        }
+        renderDetail();
+        return "OK";
     }
     if (cmd == "PLAY") {
         if (count < 2 || !toUint(tokens[1], a)) {
             return "ERR PLAY <0|1>";
         }
-        if (playingNow != (a != 0)) {
-            playingNow = a != 0;
-            ++rev;
-        }
+        setPlaying(a != 0);
         return "";
     }
     if (cmd == "CI") {

@@ -14,6 +14,12 @@
 //   TIME <unix seconds> <UTC offset minutes>  set the clock without Wi-Fi/NTP (no reply)
 //   WX <WMO code> <temp x10> <min> <max> <humidity%>   weather for the clock page (no reply);
 //                                           the city / detail line is IMG slot 1
+//   WXLOC <lat> <lon> [city]  |  WXLOC?  |  WXLOC OFF
+//                                           saved location: the board then fetches open-meteo itself
+//                                           whenever it is on a Wi-Fi with internet (e.g. the phone's
+//                                           hotspot), and draws the city line itself
+// Without the PC the same data comes from the phone: time from the iPhone (apple.cpp, CTS) or NTP,
+// now playing from the iPhone (AMS), weather from the phone web page (WX + WXLOC) or the board's own fetch.
 namespace desk {
 
 constexpr int kMacroCount = 6;
@@ -35,8 +41,23 @@ struct Sys {
     std::uint32_t up = 0;
 };
 
+struct Location {
+    bool valid = false;
+    float lat = 0;
+    float lon = 0;
+    String city;                   // UTF-8, may be empty
+};
+
 void begin();
 String handleCommand(const String& cmd, const String* tokens, int count);
+
+// Clock: sets the system time and time zone; the UTC offset is saved and also used for NTP.
+void setTime(long long unixSeconds, long utcOffsetMinutes);
+long utcOffsetMinutes();           // last known offset (TIME, iPhone, weather API), default UTC+8
+void setPlaying(bool playing);     // now-playing state from the PC (PLAY) or the iPhone (AMS)
+
+Location location();
+bool fetchWeather();               // open-meteo for location(); blocking (needs Wi-Fi + internet)
 
 Sys sys();
 Weather weather();

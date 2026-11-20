@@ -22,6 +22,7 @@
 #include "app.h"
 #include "ble_hid.h"
 #include "board_pins.h"
+#include "desk.h"
 #include "pbank.h"
 #include "web_index.h"
 
@@ -695,7 +696,7 @@ void loop() {
         startNetworkServices();
     }
     if (connected && !ntpStarted) {
-        configTime(8 * 3600, 0, "ntp.aliyun.com", "pool.ntp.org");
+        configTime(desk::utcOffsetMinutes() * 60L, 0, "ntp.aliyun.com", "pool.ntp.org");
         ntpStarted = true;
     }
 
@@ -706,11 +707,16 @@ void loop() {
     serviceMqtt(connected, now);
     serviceBridge();
 
+    // While the clock page is shown: every 15 min, a failed try again after 1 min (each try blocks up to a few s).
     if (connected && weatherWanted
-        && (!weatherFetched || now - lastWeatherMs > kWeatherPeriodMs)) {
-        lastWeatherMs = now;
+        && (lastWeatherMs == 0 || now - lastWeatherMs > (weatherFetched ? kWeatherPeriodMs : 60000UL))) {
+        lastWeatherMs = now == 0 ? 1 : now;
         weatherWanted = false;
-        fetchWeather();
+        if (desk::location().valid) {
+            weatherFetched = desk::fetchWeather();   // open-meteo for the saved location (WXLOC)
+        } else {
+            fetchWeather();                          // no location: wttr.in guesses it from the IP
+        }
     }
 }
 
@@ -762,6 +768,11 @@ String weatherLine() {
 
 void requestWeather() {
     weatherWanted = true;
+}
+
+void requestWeatherNow() {
+    weatherFetched = false;
+    lastWeatherMs = 0;
 }
 
 bool bleConnected() {

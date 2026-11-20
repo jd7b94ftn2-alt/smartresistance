@@ -11,6 +11,7 @@
 
 #include "ancs.h"
 #include "app.h"
+#include "apple.h"
 #include "board_pins.h"
 #include "comm.h"
 #include "desk.h"
@@ -1300,7 +1301,7 @@ void renderInfo() {
             kInfo, TC_DATUM);
     } else {
         bigNumber(0, kWidth / 2, 32, 300, "--:--:--", kDim, TC_DATUM);
-        label(1, kWidth / 2, 88, 300, tr("等待对时：上位机「桌面助手」或 Wi-Fi", "Waiting for time: PC host or Wi-Fi"),
+        label(1, kWidth / 2, 88, 300, tr("等待对时：iPhone 蓝牙、Wi-Fi 或上位机", "Waiting for time: iPhone, Wi-Fi or PC"),
             Font::Small, kDim, TC_DATUM);
     }
 
@@ -1328,7 +1329,7 @@ void renderInfo() {
         } else if (comm::weatherLine().length() > 0) {
             text(comm::weatherLine(), kWidth / 2, kWeatherY + 30, Font::Small, kWarn, kCard, 0, MC_DATUM, 2);
         } else {
-            text(tr("天气：在上位机「桌面助手」里填城市", "Weather: set a city in the PC host"), kWidth / 2, kWeatherY + 30,
+            text(tr("天气：手机网页「同步天气」或上位机", "Weather: phone web page or PC host"), kWidth / 2, kWeatherY + 30,
                 Font::Small, kDim, kCard, 0, MC_DATUM, 2);
         }
     }
@@ -1456,6 +1457,13 @@ String rateText(std::uint32_t bytesPerSecond) {
     return String(bytesPerSecond / 1024.0f, 1) + " KB/s";
 }
 
+// Desk page media keys: to the iPhone (AMS) when the card shows the phone's track, else USB / BLE keyboard.
+void deskMedia(comm::Action pcAction, apple::Command phoneCommand) {
+    if (!(apple::mediaShown() && apple::command(phoneCommand))) {
+        comm::sendAction(pcAction);
+    }
+}
+
 std::uint16_t loadColor(int percent) {
     return percent >= 85 ? kBad : (percent >= 60 ? kWarn : kGood);
 }
@@ -1512,7 +1520,9 @@ void renderDesk() {
         label(5, 308, 86, 48, "--", Font::Small, kDim, TR_DATUM);
         bar(7, 56, 113, 200, 10, 0, kButton);
         label(8, 308, 108, 48, "--", Font::Small, kDim, TR_DATUM);
-        label(9, 12, 130, 296, tr("在上位机「桌面助手」里开始推送", "Start pushing in the PC host"), Font::Small, kDim);
+        label(9, 12, 130, 296, apple::mediaReady() ? tr("未连电脑 · 音乐和时间来自 iPhone", "No PC · music + time from iPhone")
+                                                   : tr("在上位机「桌面助手」里开始推送", "Start pushing in the PC host"),
+            Font::Small, kDim);
     }
 
     msg::Message m;
@@ -2756,15 +2766,15 @@ Tap onTouch(int x, int y) {
 
         case Page::Desk:
             if (kDeskPrev.contains(x, y)) {
-                comm::sendAction(comm::Action::PrevTrack);
+                deskMedia(comm::Action::PrevTrack, apple::Command::Previous);
                 return Tap::Done;
             }
             if (kDeskPlay.contains(x, y)) {
-                comm::sendAction(comm::Action::PlayPause);
+                deskMedia(comm::Action::PlayPause, apple::Command::TogglePlayPause);
                 return Tap::Done;
             }
             if (kDeskNext.contains(x, y)) {
-                comm::sendAction(comm::Action::NextTrack);
+                deskMedia(comm::Action::NextTrack, apple::Command::Next);
                 return Tap::Done;
             }
             break;
@@ -3106,7 +3116,8 @@ void onRotate(int steps) {
 
         case Page::Desk:
             for (int i = 0; i < (steps < 0 ? -steps : steps); ++i) {
-                comm::sendAction(steps > 0 ? comm::Action::VolumeUp : comm::Action::VolumeDown);
+                deskMedia(steps > 0 ? comm::Action::VolumeUp : comm::Action::VolumeDown,
+                    steps > 0 ? apple::Command::VolumeUp : apple::Command::VolumeDown);
             }
             break;
 
@@ -3188,7 +3199,7 @@ void onShortPress() {
             msgScroll = 0;      // back to the newest
             break;
         case Page::Desk:
-            comm::sendAction(comm::Action::PlayPause);
+            deskMedia(comm::Action::PlayPause, apple::Command::TogglePlayPause);
             break;
         case Page::Macro:
             fireMacro(macroField);

@@ -20,11 +20,18 @@ struct Slot {
 Slot slots[kMaxMessages];
 Slot images[kImageSlots];
 bool imageValid[kImageSlots] = {};
+std::uint32_t imageStamps[kImageSlots] = {};
+std::uint32_t stampCounter = 0;
 int newest = kMaxMessages - 1;      // the first commit goes to slot 0
 int stored = 0;
 int unreadCount = 0;
 std::uint32_t rev = 1;
 std::uint32_t imgRev = 1;
+
+void touchImage(int slot) {
+    ++imgRev;
+    imageStamps[slot] = ++stampCounter;
+}
 
 // The card / image currently being received.
 std::uint8_t* pending = nullptr;
@@ -170,12 +177,12 @@ String handleCommand(const String& cmd, const String* tokens, int count) {
                 return "ERR no memory";
             }
             imageValid[slot] = true;
-            ++imgRev;
+            touchImage(slot);
             return "OK";
         }
         if (cmd == "IMGCLR") {
             imageValid[slot] = false;
-            ++imgRev;
+            touchImage(slot);
             return "OK";
         }
         return "ERR unknown IMG command";
@@ -266,6 +273,41 @@ bool image(int slot, Message& out) {
 
 std::uint32_t imageRevision() {
     return imgRev;
+}
+
+std::uint32_t imageStamp(int slot) {
+    return slot >= 0 && slot < kImageSlots ? imageStamps[slot] : 0;
+}
+
+bool setImage(int slot, int width, int height, const std::uint8_t* pixels) {
+    if (slot < 0 || slot >= kImageSlots || width < 8 || width > kMaxWidth || height < 8 || height > kMaxHeight
+        || pixels == nullptr) {
+        return false;
+    }
+    Slot& s = images[slot];
+    if (s.data == nullptr) {
+        s.data = allocate(kSlotBytes);
+        if (s.data == nullptr) {
+            return false;
+        }
+    }
+    memcpy(s.data, pixels, static_cast<std::size_t>((width + 3) / 4) * height);
+    s.info.id = 0xFFFF;
+    s.info.app = App::Other;
+    s.info.width = static_cast<std::uint16_t>(width);
+    s.info.height = static_cast<std::uint16_t>(height);
+    s.info.receivedMs = millis();
+    s.info.pixels = s.data;
+    imageValid[slot] = true;
+    touchImage(slot);
+    return true;
+}
+
+void clearImage(int slot) {
+    if (slot >= 0 && slot < kImageSlots && imageValid[slot]) {
+        imageValid[slot] = false;
+        touchImage(slot);
+    }
 }
 
 void markAllRead() {
