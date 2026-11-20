@@ -2702,8 +2702,9 @@ constexpr int kShareRowY = 30;
 constexpr int kShareRowH = 36;
 const Rect kShareDelete = {236, 211, 76, 26};
 
-constexpr int kTextX = 10;
-constexpr int kTextW = 300;
+constexpr int kTextX = 8;
+constexpr int kTextW = 296;             // wrap width
+constexpr int kTextHang = 304;          // closing punctuation may hang past it rather than start a line
 constexpr int kTextLines = 9;
 const char* textBase = nullptr;
 std::size_t textSize = 0;
@@ -2790,7 +2791,24 @@ bool pushTextLine(std::uint32_t start) {
     return true;
 }
 
-// Word-wraps the whole text once (about 0.5 s per MB); lines are kept as byte offsets.
+bool latinWordChar(std::uint32_t c) {
+    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '\'' || c == '-' || c == '_'
+        || (c >= 0xC0 && c <= 0x24F);
+}
+
+bool noLineStart(std::uint32_t c) {     // closing punctuation that should not begin a line
+    switch (c) {
+        case ',': case '.': case ';': case ':': case '!': case '?': case ')': case ']':
+        case 0x3001: case 0x3002: case 0xFF0C: case 0xFF0E: case 0xFF1B: case 0xFF1A: case 0xFF01: case 0xFF1F:
+        case 0xFF09: case 0x3011: case 0x300B: case 0x300D: case 0x300F: case 0x201D: case 0x2019: case 0x2026:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Word-wraps the whole text once (about 0.5 s per MB); lines are kept as byte offsets. Latin words
+// move to the next line whole; CJK text breaks anywhere except before closing punctuation.
 void layoutText(const char* data, std::size_t size) {
     textBase = data;
     textSize = size;
@@ -2803,7 +2821,9 @@ void layoutText(const char* data, std::size_t size) {
         p += 3;                          // UTF-8 BOM
     }
     std::uint32_t lineStart = static_cast<std::uint32_t>(p - data);
+    std::uint32_t breakAt = lineStart;  // after the last space / non-Latin character on this line
     int width = 0;
+    int widthAtBreak = 0;
     while (p < end) {
         const char* at = p;
         const std::uint32_t code = textfont::decode(p, end);
@@ -2811,22 +2831,33 @@ void layoutText(const char* data, std::size_t size) {
             if (!pushTextLine(lineStart)) {
                 return;
             }
-            lineStart = static_cast<std::uint32_t>(p - data);
-            width = 0;
+            lineStart = breakAt = static_cast<std::uint32_t>(p - data);
+            width = widthAtBreak = 0;
             continue;
         }
         if (code == '\r') {
             continue;
         }
         const int adv = textfont::advance(code == '\t' ? ' ' : code);
-        if (width > 0 && width + adv > kTextW) {
+        if (width > 0 && width + adv > kTextW && !(noLineStart(code) && width + adv <= kTextHang)) {
             if (!pushTextLine(lineStart)) {
                 return;
             }
-            lineStart = static_cast<std::uint32_t>(at - data);
-            width = 0;
+            if (latinWordChar(code) && breakAt > lineStart) {
+                lineStart = breakAt;            // the word in progress moves down whole
+                width -= widthAtBreak;
+            } else {
+                lineStart = static_cast<std::uint32_t>(at - data);
+                width = 0;
+            }
+            breakAt = lineStart;
+            widthAtBreak = 0;
         }
         width += adv;
+        if (!latinWordChar(code)) {
+            breakAt = static_cast<std::uint32_t>(p - data);
+            widthAtBreak = width;
+        }
     }
     if (lineStart < size || textLineCount == 0) {
         pushTextLine(lineStart);
@@ -2848,7 +2879,7 @@ void drawTextLine(int index, int y) {
         }
     }
     buffer[n] = '\0';
-    drawUtf8(kTextX, y, kTextW, buffer, kFg, kBg);
+    drawUtf8(kTextX, y, kTextHang, buffer, kFg, kBg);
 }
 
 void openShared(std::uint16_t id) {
