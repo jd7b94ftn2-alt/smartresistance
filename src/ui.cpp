@@ -39,23 +39,44 @@ void present() {
     if (shadow == nullptr) {
         return;
     }
+    // Bounding box of the changed pixels: rows by memcmp, columns by scanning the changed rows from
+    // both ends (only as far as the box so far). A piece moving in the game well then sends about a
+    // third of the row width instead of all 320 px.
     const std::uint16_t* frame = static_cast<const std::uint16_t*>(canvas.getPointer());
     int first = -1;
     int last = -1;
+    int left = kWidth;
+    int right = -1;
     for (int y = 0; y < kHeight; ++y) {
-        if (memcmp(frame + y * kWidth, shadow + y * kWidth, kWidth * 2) != 0) {
-            if (first < 0) {
-                first = y;
-            }
-            last = y;
+        const std::uint16_t* a = frame + y * kWidth;
+        const std::uint16_t* b = shadow + y * kWidth;
+        if (memcmp(a, b, kWidth * 2) == 0) {
+            continue;
         }
+        if (first < 0) {
+            first = y;
+        }
+        last = y;
+        int l = 0;
+        while (l < left && a[l] == b[l]) {
+            ++l;
+        }
+        left = std::min(left, l);
+        int r = kWidth - 1;
+        while (r > right && a[r] == b[r]) {
+            --r;
+        }
+        right = std::max(right, r);
     }
     if (first < 0) {
         return;
     }
     const int rows = last - first + 1;
-    canvas.pushSprite(0, first, 0, first, kWidth, rows);
-    memcpy(shadow + first * kWidth, frame + first * kWidth, static_cast<std::size_t>(rows) * kWidth * 2);
+    const int cols = right - left + 1;
+    canvas.pushSprite(left, first, left, first, cols, rows);
+    for (int y = first; y <= last; ++y) {
+        memcpy(shadow + y * kWidth + left, frame + y * kWidth + left, static_cast<std::size_t>(cols) * 2);
+    }
 }
 
 void invalidatePanel() {              // next present() pushes the whole frame
