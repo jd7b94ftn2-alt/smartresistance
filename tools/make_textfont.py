@@ -1,5 +1,5 @@
-"""Builds data/font_text16.bin: a 16 px, 2-bit anti-aliased font for arbitrary Chinese text
-(iPhone notifications rendered on the board, src/textfont.cpp).
+"""Builds data/font_text<size>.bin: a 2-bit anti-aliased font for arbitrary Chinese text, 16 px
+(iPhone notifications, the 分享 reader) and 24 px (larger reader sizes), src/textfont.cpp.
 
 Glyphs: printable ASCII + every GB2312 character (6763 hanzi, punctuation, full-width forms) + a few
 extras. Font: Noto Sans SC (SIL Open Font License, C:\\Windows\\Fonts\\NotoSansSC-VF.ttf or pass a path).
@@ -9,7 +9,7 @@ Layout (little-endian):
     count x { u16 code; u8 w; u8 h; i8 dx; i8 top; u8 advance; u8 reserved; u32 offset }   sorted by code
     bitmaps: per glyph w*h pixels, 2 bits each, packed 4 per byte, high bits first, no row padding
 
-    python tools/make_textfont.py [font.ttf]
+    python tools/make_textfont.py [size] [font.ttf]      (size 16 or 24; default 16)
 """
 import os
 import struct
@@ -18,9 +18,10 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, 'data', 'font_text16.bin')
-FONT = sys.argv[1] if len(sys.argv) > 1 else r'C:\Windows\Fonts\NotoSansSC-VF.ttf'
-SIZE = 16
+ARGS = sys.argv[1:]
+SIZE = int(ARGS.pop(0)) if ARGS and ARGS[0].isdigit() else 16
+FONT = ARGS[0] if ARGS else r'C:\Windows\Fonts\NotoSansSC-VF.ttf'
+OUT = os.path.join(ROOT, 'data', f'font_text{SIZE}.bin')
 EXTRA = '…·•—–‘’“”•°℃Ω×÷←→↑↓★☆✓✔✕✖€£¥'
 
 

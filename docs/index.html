@@ -115,7 +115,7 @@ pre{background:var(--inset);border-radius:12px;padding:10px;margin:10px 0 0;font
 
 <div class="card">
   <h2><span>分享到屏幕</span><span id="shState"></span></h2>
-  <div class="sub" id="shInfo">选一张图片或 txt 文本，板子收到马上显示（图片自动缩小到屏幕大小，板子保存最近 30 个）</div>
+  <div class="sub" id="shInfo">选一张图片或 txt 文本，板子收到马上显示，可以缩放（Wi-Fi 发的图更清楚、能放大 4 倍；板子保存最近 30 个）</div>
   <div class="row"><label class="filebtn">选择图片 / txt<input id="shFile" type="file" accept="image/*,.txt,text/plain" style="display:none"></label></div>
   <div class="prog"><i id="shBar"></i></div>
 </div>
@@ -299,15 +299,20 @@ function render() {
 let uploading = false;
 function shInfo(text, state) { $("shInfo").textContent = text; $("shState").textContent = state || ""; }
 function shProgress(f) { $("shBar").style.width = Math.round(Math.max(0, Math.min(1, f)) * 100) + "%"; }
-async function pictureJpeg(file) {
+// Wi-Fi: up to 1280 x 960 (the board zooms 4x with real detail); Bluetooth is slow: 640 x 480.
+async function pictureJpeg(file, maxW, maxH) {
   const url = URL.createObjectURL(file);
   try {
     const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => bad(new Error("图片打不开")); i.src = url; });
-    const s = Math.min(1, 320 / img.naturalWidth, 240 / img.naturalHeight);
+    const s = Math.min(1, maxW / img.naturalWidth, maxH / img.naturalHeight);
     const w = Math.max(1, Math.round(img.naturalWidth * s)), h = Math.max(1, Math.round(img.naturalHeight * s));
     const c = document.createElement("canvas"); c.width = w; c.height = h;
     const g = c.getContext("2d"); g.fillStyle = "#000"; g.fillRect(0, 0, w, h); g.drawImage(img, 0, 0, w, h);
-    const blob = await new Promise(ok => c.toBlob(ok, "image/jpeg", 0.85));
+    let blob = null;
+    for (const q of [0.85, 0.75, 0.65, 0.55, 0.45, 0.35]) {      // the board takes up to 400 KB
+      blob = await new Promise(ok => c.toBlob(ok, "image/jpeg", q));
+      if (blob.size <= 380 * 1024) break;
+    }
     return new Uint8Array(await blob.arrayBuffer());
   } finally { URL.revokeObjectURL(url); }
 }
@@ -369,7 +374,8 @@ $("shFile").addEventListener("change", async e => {
   try {
     shProgress(0);
     shInfo("正在处理 " + file.name + " …", "");
-    const data = isText ? await textUtf8(file) : await pictureJpeg(file);
+    const big = link === httpLink;
+    const data = isText ? await textUtf8(file) : await pictureJpeg(file, big ? 1280 : 640, big ? 960 : 480);
     const kb = (data.length / 1024).toFixed(1), t0 = Date.now();
     shInfo(`正在发送 ${file.name}（${kb} KB）…`, "发送中");
     const kind = isText ? "TXT" : "IMG";

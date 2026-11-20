@@ -3,8 +3,9 @@
 #include <algorithm>
 #include <cstring>
 
-// Linked from data/font_text16.bin by board_build.embed_files (symbol name = path with '_').
-extern const std::uint8_t kTextFontStart[] asm("_binary_data_font_text16_bin_start");
+// Linked from data/font_text16.bin / font_text24.bin by board_build.embed_files (symbol = path with '_').
+extern const std::uint8_t kTextFont16[] asm("_binary_data_font_text16_bin_start");
+extern const std::uint8_t kTextFont24[] asm("_binary_data_font_text24_bin_start");
 
 namespace textfont {
 namespace {
@@ -13,12 +14,20 @@ namespace {
 // generator). The data sits in memory-mapped flash: every field is read byte by byte, because an
 // unaligned 16 / 32-bit load from flash faults on the ESP32-S3.
 constexpr int kEntryBytes = 12;
-const std::uint8_t* base = nullptr;
-const std::uint8_t* entries = nullptr;
-const std::uint8_t* bitmaps = nullptr;
-int glyphCount = 0;
-int line = 20;
-bool checked = false;
+
+struct Font {                          // plain aggregate (gnu++11: no member initializers)
+    const std::uint8_t* source;
+    const std::uint8_t* entries;
+    const std::uint8_t* bitmaps;
+    int glyphCount;
+    int line;
+    bool checked;
+    bool valid;
+};
+Font fonts[2] = {
+    {kTextFont16, nullptr, nullptr, 0, 20, false, false},
+    {kTextFont24, nullptr, nullptr, 0, 29, false, false},
+};
 
 struct Glyph {
     int w = 0;
@@ -29,32 +38,31 @@ struct Glyph {
     const std::uint8_t* data = nullptr;
 };
 
-bool init() {
-    if (checked) {
-        return base != nullptr;
+Font& fontFor(Face face) {
+    Font& f = fonts[face == Face::Large ? 1 : 0];
+    if (!f.checked) {
+        f.checked = true;
+        const std::uint8_t* d = f.source;
+        if (d[0] == 'T' && d[1] == 'F' && d[2] == '1' && d[3] == '6') {
+            f.glyphCount = d[4] | (d[5] << 8);
+            f.line = d[6];
+            f.entries = d + 8;
+            f.bitmaps = f.entries + static_cast<std::size_t>(f.glyphCount) * kEntryBytes;
+            f.valid = true;
+        }
     }
-    checked = true;
-    const std::uint8_t* d = kTextFontStart;
-    if (d[0] != 'T' || d[1] != 'F' || d[2] != '1' || d[3] != '6') {
-        return false;
-    }
-    glyphCount = d[4] | (d[5] << 8);
-    line = d[6];
-    entries = d + 8;
-    bitmaps = entries + static_cast<std::size_t>(glyphCount) * kEntryBytes;
-    base = d;
-    return true;
+    return f;
 }
 
-bool lookup(std::uint32_t code, Glyph& g) {
-    if (!init() || code > 0xFFFF) {
+bool lookup(const Font& f, std::uint32_t code, Glyph& g) {
+    if (!f.valid || code > 0xFFFF) {
         return false;
     }
     int lo = 0;
-    int hi = glyphCount - 1;
+    int hi = f.glyphCount - 1;
     while (lo <= hi) {
         const int mid = (lo + hi) / 2;
-        const std::uint8_t* e = entries + static_cast<std::size_t>(mid) * kEntryBytes;
+        const std::uint8_t* e = f.entries + static_cast<std::size_t>(mid) * kEntryBytes;
         const std::uint32_t c = e[0] | (e[1] << 8);
         if (c == code) {
             g.w = e[2];
@@ -64,7 +72,7 @@ bool lookup(std::uint32_t code, Glyph& g) {
             g.advance = e[6];
             const std::uint32_t offset = e[8] | (e[9] << 8) | (static_cast<std::uint32_t>(e[10]) << 16)
                 | (static_cast<std::uint32_t>(e[11]) << 24);
-            g.data = bitmaps + offset;
+            g.data = f.bitmaps + offset;
             return true;
         }
         if (c < code) {
@@ -108,36 +116,44 @@ std::uint32_t nextCode(const char*& p) {
 }
 
 // Glyph for a code point; unknown characters (emoji, rare hanzi) show as a hollow box.
-bool glyphFor(std::uint32_t code, Glyph& g) {
+bool glyphFor(const Font& f, std::uint32_t code, Glyph& g) {
     if (code == '\n' || code == '\r' || code == '\t') {
         code = ' ';
     }
-    if (lookup(code, g)) {
+    if (lookup(f, code, g)) {
         return true;
     }
     if (code == 0xFE0F || code == 0x200D || (code >= 0x1F3FB && code <= 0x1F3FF)) {
         g = Glyph();               // emoji modifiers: nothing
         return true;
     }
-    return lookup(0x25A1, g) || lookup('?', g);
+    return lookup(f, 0x25A1, g) || lookup(f, '?', g);
+}
+
+const Font& small() {
+    return fontFor(Face::Small);
 }
 
 }  // namespace
 
 bool ready() {
-    return init();
+    return small().valid;
 }
 
 int lineHeight() {
-    init();
-    return line;
+    return small().line;
+}
+
+int lineHeight(Style style) {
+    return fontFor(style.face).line * std::max(1, style.scale);
 }
 
 int width(const char* utf8) {
+    const Font& f = small();
     int total = 0;
     for (const char* p = utf8; *p != '\0';) {
         Glyph g;
-        if (glyphFor(nextCode(p), g)) {
+        if (glyphFor(f, nextCode(p), g)) {
             total += g.advance;
         }
     }
@@ -148,15 +164,16 @@ String fit(const char* utf8, int maxWidth) {
     if (width(utf8) <= maxWidth) {
         return String(utf8);
     }
+    const Font& f = small();
     Glyph dots;
-    const int ellipsis = lookup(0x2026, dots) ? dots.advance : 0;
+    const int ellipsis = lookup(f, 0x2026, dots) ? dots.advance : 0;
     int used = 0;
     const char* p = utf8;
     const char* cut = utf8;
     while (*p != '\0') {
         const char* before = p;
         Glyph g;
-        if (!glyphFor(nextCode(p), g)) {
+        if (!glyphFor(f, nextCode(p), g)) {
             continue;
         }
         if (used + g.advance + ellipsis > maxWidth) {
@@ -183,7 +200,7 @@ std::uint32_t decode(const char*& p, const char* end) {
     if (b < 0x80) {
         return b;
     }
-    int extra = (b & 0xE0) == 0xC0 ? 1 : (b & 0xF0) == 0xE0 ? 2 : (b & 0xF8) == 0xF0 ? 3 : -1;
+    const int extra = (b & 0xE0) == 0xC0 ? 1 : (b & 0xF0) == 0xE0 ? 2 : (b & 0xF8) == 0xF0 ? 3 : -1;
     if (extra < 0) {
         return 0xFFFD;
     }
@@ -199,25 +216,28 @@ std::uint32_t decode(const char*& p, const char* end) {
 
 int advance(std::uint32_t code) {
     Glyph g;
-    return glyphFor(code, g) ? g.advance : 0;
+    return glyphFor(small(), code, g) ? g.advance : 0;
 }
 
-int draw2bpp(std::uint8_t* bitmap, int w, int h, int x, int y, const char* utf8, int level, int maxX) {
+int advance(std::uint32_t code, Style style) {
+    Glyph g;
+    return glyphFor(fontFor(style.face), code, g) ? g.advance * std::max(1, style.scale) : 0;
+}
+
+int draw2bpp(Style style, std::uint8_t* bitmap, int w, int h, int x, int y, const char* utf8, int level, int maxX) {
+    const Font& f = fontFor(style.face);
+    const int s = std::max(1, std::min(4, style.scale));
     const int stride = (w + 3) / 4;
     maxX = std::min(maxX, w);
     for (const char* p = utf8; *p != '\0';) {
         Glyph g;
-        if (!glyphFor(nextCode(p), g)) {
+        if (!glyphFor(f, nextCode(p), g)) {
             continue;
         }
-        if (x + g.advance > maxX) {
+        if (x + g.advance * s > maxX) {
             break;
         }
         for (int r = 0; r < g.h; ++r) {
-            const int py = y + g.top + r;
-            if (py < 0 || py >= h) {
-                continue;
-            }
             for (int c = 0; c < g.w; ++c) {
                 const int k = r * g.w + c;
                 int v = (g.data[k >> 2] >> (6 - 2 * (k & 3))) & 3;
@@ -225,21 +245,33 @@ int draw2bpp(std::uint8_t* bitmap, int w, int h, int x, int y, const char* utf8,
                     continue;
                 }
                 v = (v * level + 2) / 3;
-                const int px = x + g.dx + c;
-                if (px < 0 || px >= maxX) {
-                    continue;
-                }
-                std::uint8_t& byte = bitmap[py * stride + (px >> 2)];
-                const int shift = 6 - 2 * (px & 3);
-                const int old = (byte >> shift) & 3;
-                if (v > old) {
-                    byte = static_cast<std::uint8_t>((byte & ~(3 << shift)) | (v << shift));
+                for (int sy = 0; sy < s; ++sy) {
+                    const int py = y + (g.top + r) * s + sy;
+                    if (py < 0 || py >= h) {
+                        continue;
+                    }
+                    for (int sx = 0; sx < s; ++sx) {
+                        const int px = x + (g.dx + c) * s + sx;
+                        if (px < 0 || px >= maxX) {
+                            continue;
+                        }
+                        std::uint8_t& byte = bitmap[py * stride + (px >> 2)];
+                        const int shift = 6 - 2 * (px & 3);
+                        const int old = (byte >> shift) & 3;
+                        if (v > old) {
+                            byte = static_cast<std::uint8_t>((byte & ~(3 << shift)) | (v << shift));
+                        }
+                    }
                 }
             }
         }
-        x += g.advance;
+        x += g.advance * s;
     }
     return x;
+}
+
+int draw2bpp(std::uint8_t* bitmap, int w, int h, int x, int y, const char* utf8, int level, int maxX) {
+    return draw2bpp(Style(), bitmap, w, h, x, y, utf8, level, maxX);
 }
 
 }  // namespace textfont

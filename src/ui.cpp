@@ -1,6 +1,7 @@
 #include "ui.h"
 
 #include <TFT_eSPI.h>
+#include <Preferences.h>
 #include <TJpg_Decoder.h>
 #include <esp_heap_caps.h>
 #include <esp_task_wdt.h>
@@ -2705,24 +2706,80 @@ const Rect kShareDelete = {236, 211, 76, 26};
 constexpr int kTextX = 8;
 constexpr int kTextW = 296;             // wrap width
 constexpr int kTextHang = 304;          // closing punctuation may hang past it rather than start a line
-constexpr int kTextLines = 9;
+constexpr int kTextAreaY = 30;
+constexpr int kTextAreaH = 180;         // 30..210, footer below
+// Reader sizes: 16 px and 24 px fonts, and both doubled. Saved in NVS ("share" / "tsize").
+struct ReaderSize {
+    textfont::Face face;
+    int scale;
+    int lineH;
+};
+const ReaderSize kReaderSizes[] = {
+    {textfont::Face::Small, 1, 20}, {textfont::Face::Large, 1, 30}, {textfont::Face::Small, 2, 40}, {textfont::Face::Large, 2, 60},
+};
+constexpr int kReaderSizeCount = sizeof(kReaderSizes) / sizeof(kReaderSizes[0]);
+int readerSize = -1;                    // loaded on first use
+const Rect kTextSmaller = {134, 213, 46, 24};
+const Rect kTextBigger = {184, 213, 46, 24};
 const char* textBase = nullptr;
-std::size_t textSize = 0;
+std::size_t textBytes = 0;
 std::uint32_t* textStarts = nullptr;    // PSRAM: byte offset of every wrapped line
 int textLineCount = 0;
 int textCapacity = 0;
 int textTop = 0;
 
-// One line of UTF-8 in the text font (any GB2312 character), colour fg on bg, top of the line box at y.
-void drawUtf8(int x, int y, int maxWidth, const char* utf8, std::uint16_t fg, std::uint16_t bg) {
+textfont::Style readerStyle() {
+    return textfont::Style(kReaderSizes[readerSize].face, kReaderSizes[readerSize].scale);
+}
+
+int readerLines() {
+    return kTextAreaH / kReaderSizes[readerSize].lineH;
+}
+
+// Picture viewer: zoom 1x (fit), 2x, 4x, panned by tapping where to look. The picture is decoded once
+// per zoom into a PSRAM cache (up to 1280 x 960 x 2 bytes) and the view is copied from there.
+constexpr int kMaxZoom = 2;
+constexpr int kToolbarY = 204;
+int zoomLevel = 0;
+float viewCx = 0.5f;                    // view centre as a fraction of the picture
+float viewCy = 0.5f;
+std::uint32_t toolbarUntil = 0;
+std::uint16_t* zoomBuf = nullptr;
+std::size_t zoomBufPixels = 0;
+int zoomW = 0;                          // decoded size held in zoomBuf
+int zoomH = 0;
+int zoomFile = -1;
+int zoomScale = 0;
+int imageFile = -1;                     // JPEG size of this file
+int imageW = 0;
+int imageH = 0;
+int viewOx = 0;                         // last blit: screen offset, view origin, zoomed size
+int viewOy = 0;
+int viewVx = 0;
+int viewVy = 0;
+int viewZw = 0;
+int viewZh = 0;
+
+void freeZoomCache() {
+    free(zoomBuf);
+    zoomBuf = nullptr;
+    zoomBufPixels = 0;
+    zoomFile = -1;
+}
+
+// One line of UTF-8 in a text font (any GB2312 character), colour fg on bg, top of the line box at y.
+void drawUtf8(int x, int y, int maxWidth, const char* utf8, std::uint16_t fg, std::uint16_t bg,
+    textfont::Style style = textfont::Style()) {
     constexpr int kMaxW = 304;
-    static std::uint8_t line[((kMaxW + 3) / 4) * 20];
+    constexpr int kMaxH = 60;
+    static std::uint8_t line[((kMaxW + 3) / 4) * kMaxH];
     const int w = std::min(kMaxW, maxWidth);
-    memset(line, 0, sizeof(line));
-    textfont::draw2bpp(line, w, 20, 0, 0, utf8, 3, w);
+    const int h = std::min(kMaxH, textfont::lineHeight(style));
+    memset(line, 0, static_cast<std::size_t>((w + 3) / 4) * h);
+    textfont::draw2bpp(style, line, w, h, 0, 0, utf8, 3, w);
     msg::Message m;
     m.width = static_cast<std::uint16_t>(w);
-    m.height = 20;
+    m.height = static_cast<std::uint16_t>(h);
     m.pixels = line;
     drawBitmap2bpp(x, y, m, bg, fg);
 }
@@ -2741,39 +2798,145 @@ void shareIcon(share::Kind kind, int cx, int cy, std::uint16_t c) {
     }
 }
 
-bool jpegBlock(std::int16_t x, std::int16_t y, std::uint16_t w, std::uint16_t h, std::uint16_t* bitmap) {
-    if (y >= kHeight) {
+// TJpg_Decoder output -> zoomBuf (RGB565 already byte-swapped, the frame buffer's order).
+bool jpegToCache(std::int16_t x, std::int16_t y, std::uint16_t w, std::uint16_t h, std::uint16_t* bitmap) {
+    if (y >= zoomH) {
         return false;
     }
-    // pushImage is not virtual in TFT_eSPI: call the sprite's own version (gfx-> would run the panel code).
-    if (gfx == &canvas) {
-        canvas.pushImage(x, y, w, h, bitmap);
-    } else {
-        tft.pushImage(x, y, w, h, bitmap);
+    const int cols = std::min<int>(w, zoomW - x);
+    if (cols <= 0) {
+        return true;
+    }
+    for (int r = 0; r < h && y + r < zoomH; ++r) {
+        memcpy(zoomBuf + static_cast<std::size_t>(y + r) * zoomW + x, bitmap + r * w, static_cast<std::size_t>(cols) * 2);
     }
     return true;
 }
 
-// Whole screen: the picture centred on black, scaled down by 2 / 4 / 8 when it is bigger than the screen.
-bool drawJpeg(const std::uint8_t* data, std::size_t size) {
+bool pictureSize(const std::uint8_t* data, std::size_t size) {
+    if (imageFile == shareId) {
+        return imageW > 0;
+    }
     std::uint16_t w = 0;
     std::uint16_t h = 0;
-    crumb(3);
+    imageFile = shareId;
+    imageW = imageH = 0;
     if (TJpgDec.getJpgSize(&w, &h, data, size) != JDR_OK || w == 0 || h == 0) {
         return false;
     }
-    std::uint8_t scale = 1;
-    while (scale < 8 && (w / scale > kWidth || h / scale > kHeight)) {
-        scale = static_cast<std::uint8_t>(scale * 2);
+    imageW = w;
+    imageH = h;
+    return true;
+}
+
+// Decodes the picture at 1/scale (1, 2, 4, 8) into zoomBuf, unless it is there already.
+bool decodeToCache(const std::uint8_t* data, std::size_t size, int scale) {
+    if (zoomFile == shareId && zoomScale == scale) {
+        return true;
     }
-    TJpgDec.setJpgScale(scale);
-    TJpgDec.setSwapBytes(true);          // the frame buffer holds RGB565 in panel (big-endian) order
-    TJpgDec.setCallback(jpegBlock);
-    gfx->fillRect(0, 0, kWidth, kHeight, TFT_BLACK);
-    crumb(4);
-    const bool ok = TJpgDec.drawJpg((kWidth - w / scale) / 2, (kHeight - h / scale) / 2, data, size) == JDR_OK;
-    crumb(5);
+    const int w = (imageW + scale - 1) / scale;
+    const int h = (imageH + scale - 1) / scale;
+    const std::size_t pixels = static_cast<std::size_t>(w) * h;
+    if (pixels > zoomBufPixels) {
+        freeZoomCache();
+        zoomBuf = static_cast<std::uint16_t*>(heap_caps_malloc(pixels * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (zoomBuf == nullptr) {
+            return false;
+        }
+        zoomBufPixels = pixels;
+    }
+    zoomW = w;
+    zoomH = h;
+    memset(zoomBuf, 0, pixels * 2);
+    TJpgDec.setJpgScale(static_cast<std::uint8_t>(scale));
+    TJpgDec.setSwapBytes(true);
+    TJpgDec.setCallback(jpegToCache);
+    const bool ok = TJpgDec.drawJpg(0, 0, data, size) == JDR_OK;
+    zoomFile = ok ? shareId : -1;
+    zoomScale = scale;
     return ok;
+}
+
+// zoomBuf (each pixel repeated `up` times) -> the screen, centred or panned to viewCx / viewCy.
+void blitZoom(int up) {
+    const int zw = zoomW * up;
+    const int zh = zoomH * up;
+    int vx = 0;
+    int vy = 0;
+    int ox = 0;
+    int oy = 0;
+    if (zw > kWidth) {
+        vx = std::max(0, std::min(zw - kWidth, static_cast<int>(lroundf(viewCx * zw)) - kWidth / 2));
+        viewCx = (vx + kWidth / 2.0f) / zw;
+    } else {
+        ox = (kWidth - zw) / 2;
+    }
+    if (zh > kHeight) {
+        vy = std::max(0, std::min(zh - kHeight, static_cast<int>(lroundf(viewCy * zh)) - kHeight / 2));
+        viewCy = (vy + kHeight / 2.0f) / zh;
+    } else {
+        oy = (kHeight - zh) / 2;
+    }
+    viewOx = ox;
+    viewOy = oy;
+    viewVx = vx;
+    viewVy = vy;
+    viewZw = zw;
+    viewZh = zh;
+    gfx->fillRect(0, 0, kWidth, kHeight, TFT_BLACK);
+    const int cols = std::min(kWidth - ox, zw - vx);
+    const int rows = std::min(kHeight - oy, zh - vy);
+    static std::uint16_t row[kWidth];
+    for (int r = 0; r < rows; ++r) {
+        const std::uint16_t* src = zoomBuf + static_cast<std::size_t>((vy + r) / up) * zoomW;
+        std::uint16_t* dst = gfx == &canvas
+            ? static_cast<std::uint16_t*>(canvas.getPointer()) + static_cast<std::size_t>(oy + r) * kWidth + ox
+            : row;
+        if (up == 1) {
+            memcpy(dst, src + vx, static_cast<std::size_t>(cols) * 2);
+        } else {
+            for (int c = 0; c < cols; ++c) {
+                dst[c] = src[(vx + c) / up];
+            }
+        }
+        if (gfx != &canvas) {
+            tft.pushImage(ox, oy + r, cols, 1, row);
+        }
+    }
+}
+
+void drawImageToolbar() {
+    gfx->fillRect(0, kToolbarY, kWidth, kHeight - kToolbarY, kBarColor);
+    static const char* const kZoomText[] = {"1×", "2×", "4×"};
+    for (int i = 0; i < 6; ++i) {
+        const int x = 2 + i * 53;
+        const std::uint16_t face = i == 3 && zoomLevel > 0 ? kAccent : kButton;
+        panel(x, kToolbarY + 4, 50, 30, 10, face, kBarColor);
+        const int cx = x + 25;
+        const int cy = kToolbarY + 19;
+        if (i == 1 || i == 5) {                // previous / next picture
+            const int d = i == 1 ? -1 : 1;
+            gfx->fillTriangle(cx + 5 * d, cy - 7, cx + 5 * d, cy + 7, cx - 6 * d, cy, kFg);
+        } else {
+            const char* label = i == 0 ? tr("返回", "Back") : i == 2 ? "−" : i == 4 ? "+" : kZoomText[zoomLevel];
+            text(label, cx, cy + 1, i == 2 || i == 4 ? Font::Large : Font::Small, kFg, face, 0, MC_DATUM, 2, false);
+        }
+    }
+}
+
+void zoomBy(int steps) {
+    zoomLevel = std::max(0, std::min(kMaxZoom, zoomLevel + steps));
+    toolbarUntil = millis() + 2500;
+}
+
+void loadReaderSize() {
+    if (readerSize >= 0) {
+        return;
+    }
+    Preferences prefs;
+    prefs.begin("share", true);
+    readerSize = std::max(0, std::min(kReaderSizeCount - 1, static_cast<int>(prefs.getUChar("tsize", 0))));
+    prefs.end();
 }
 
 bool pushTextLine(std::uint32_t start) {
@@ -2810,8 +2973,10 @@ bool noLineStart(std::uint32_t c) {     // closing punctuation that should not b
 // Word-wraps the whole text once (about 0.5 s per MB); lines are kept as byte offsets. Latin words
 // move to the next line whole; CJK text breaks anywhere except before closing punctuation.
 void layoutText(const char* data, std::size_t size) {
+    loadReaderSize();
+    const textfont::Style style = readerStyle();
     textBase = data;
-    textSize = size;
+    textBytes = size;
     textLineCount = 0;
     textTop = 0;
     const char* p = data;
@@ -2838,7 +3003,7 @@ void layoutText(const char* data, std::size_t size) {
         if (code == '\r') {
             continue;
         }
-        const int adv = textfont::advance(code == '\t' ? ' ' : code);
+        const int adv = textfont::advance(code == '\t' ? ' ' : code, style);
         if (width > 0 && width + adv > kTextW && !(noLineStart(code) && width + adv <= kTextHang)) {
             if (!pushTextLine(lineStart)) {
                 return;
@@ -2869,7 +3034,7 @@ void drawTextLine(int index, int y) {
         return;
     }
     const std::uint32_t from = textStarts[index];
-    const std::uint32_t to = index + 1 < textLineCount ? textStarts[index + 1] : static_cast<std::uint32_t>(textSize);
+    const std::uint32_t to = index + 1 < textLineCount ? textStarts[index + 1] : static_cast<std::uint32_t>(textBytes);
     char buffer[512];
     std::size_t n = 0;
     for (std::uint32_t i = from; i < to && n + 1 < sizeof(buffer); ++i) {
@@ -2879,7 +3044,27 @@ void drawTextLine(int index, int y) {
         }
     }
     buffer[n] = '\0';
-    drawUtf8(kTextX, y, kTextHang, buffer, kFg, kBg);
+    drawUtf8(kTextX, y, kTextHang, buffer, kFg, kBg, readerStyle());
+}
+
+// A− / A+: re-wrap at the new size and stay at the same place in the text.
+void setReaderSize(int size) {
+    size = std::max(0, std::min(kReaderSizeCount - 1, size));
+    if (size == readerSize || textBase == nullptr) {
+        return;
+    }
+    const std::uint32_t anchor = textLineCount > 0 ? textStarts[std::min(textTop, textLineCount - 1)] : 0;
+    readerSize = size;
+    Preferences prefs;
+    prefs.begin("share", false);
+    prefs.putUChar("tsize", static_cast<std::uint8_t>(size));
+    prefs.end();
+    layoutText(textBase, textBytes);
+    int top = 0;
+    while (top + 1 < textLineCount && textStarts[top + 1] <= anchor) {
+        ++top;
+    }
+    textTop = top;
 }
 
 void openShared(std::uint16_t id) {
@@ -2893,6 +3078,9 @@ void openShared(std::uint16_t id) {
     shareSel = share::indexOf(id);
     if (it.kind == share::Kind::Image) {
         shareView = ShareView::Image;
+        zoomLevel = 0;
+        viewCx = viewCy = 0.5f;
+        toolbarUntil = millis() + 3000;       // show the controls for a moment
         return;
     }
     const std::uint8_t* data = nullptr;
@@ -2960,16 +3148,40 @@ void renderShareList() {
 }
 
 void renderShareImage() {
-    if (!changed(0, "img", shareId)) {
+    const bool bar = static_cast<std::int32_t>(millis() - toolbarUntil) < 0;
+    const String sig = String(zoomLevel) + ":" + lroundf(viewCx * 1000) + ":" + lroundf(viewCy * 1000) + (bar ? "T" : "");
+    if (!changed(0, sig, shareId)) {
         return;
     }
     const std::uint8_t* data = nullptr;
     std::size_t size = 0;
     crumb(1);
-    const bool loaded = share::load(shareId, data, size);
+    bool ok = share::load(shareId, data, size) && pictureSize(data, size);
     crumb(2);
-    if (loaded && drawJpeg(data, size)) {
-        return;
+    if (ok) {
+        int fit = 1;                              // decode scale that fits the screen
+        while (fit < 8 && (imageW / fit > kWidth || imageH / fit > kHeight)) {
+            fit *= 2;
+        }
+        const int mag = 1 << zoomLevel;
+        const int scale = std::max(1, fit / mag);  // more detail from the file while there is some...
+        const int up = std::max(1, mag / fit);     // ...then pixels get bigger
+        if (zoomFile != shareId || zoomScale != scale) {
+            if (zoomFile == shareId && scale < fit) {
+                text(tr("放大中…", "Zooming…"), kWidth / 2, kHeight / 2, Font::Large, kWhite, kBarColor, 8, MC_DATUM, 2);
+                present();
+            }
+            crumb(3);
+            ok = decodeToCache(data, size, scale);
+            crumb(4);
+        }
+        if (ok) {
+            blitZoom(up);
+            if (bar) {
+                drawImageToolbar();
+            }
+            return;
+        }
     }
     gfx->fillRect(0, 0, kWidth, kHeight, kBg);
     text(tr("这张图片打不开", "Cannot show this picture"), kWidth / 2, 96, Font::Large, kWarn, kBg, 0, TC_DATUM, 2, false);
@@ -2979,22 +3191,33 @@ void renderShareImage() {
 }
 
 void renderShareText() {
-    textTop = std::max(0, std::min(textTop, std::max(0, textLineCount - kTextLines)));
-    if (!changed(0, "txt", static_cast<std::uint32_t>(shareId) * 1048576U + static_cast<std::uint32_t>(textTop))) {
+    loadReaderSize();
+    const int lines = readerLines();
+    textTop = std::max(0, std::min(textTop, std::max(0, textLineCount - lines)));
+    if (!changed(0, String("txt") + readerSize, static_cast<std::uint32_t>(shareId) * 1048576U + static_cast<std::uint32_t>(textTop))) {
         return;
     }
     gfx->fillRect(0, kBar + 1, kWidth, kHeight - kBar - 1, kBg);
-    for (int i = 0; i < kTextLines; ++i) {
-        drawTextLine(textTop + i, 30 + i * 20);
+    const int lineH = kReaderSizes[readerSize].lineH;
+    for (int i = 0; i < lines; ++i) {
+        drawTextLine(textTop + i, kTextAreaY + i * lineH);
     }
-    gfx->drawFastHLine(8, 212, 304, kBorder);
+    gfx->drawFastHLine(8, 211, 304, kBorder);
     share::Item it;
     if (share::find(shareId, it)) {
-        drawUtf8(10, 216, 200, textfont::fit(it.name.c_str(), 196).c_str(), kDim, kBg);
+        drawUtf8(8, 216, 122, textfont::fit(it.name.c_str(), 120).c_str(), kDim, kBg);
     }
-    const int pages = std::max(1, (textLineCount + kTextLines - 1) / kTextLines);
-    const int pageNow = std::min(pages, textTop / kTextLines + 1);
-    text(String(pageNow) + " / " + pages, 310, 226, Font::Small, kDim, kBg, 0, MR_DATUM, 2, false);
+    const Rect* sizeButtons[2] = {&kTextSmaller, &kTextBigger};
+    for (int i = 0; i < 2; ++i) {
+        const Rect& r = *sizeButtons[i];
+        const bool usable = i == 0 ? readerSize > 0 : readerSize < kReaderSizeCount - 1;
+        panel(r.x, r.y, r.w, r.h, 10, kButton);
+        text(i == 0 ? "A−" : "A+", r.x + r.w / 2, r.y + r.h / 2 + 1, Font::Small, usable ? kFg : kBorder, kButton, 0, MC_DATUM,
+            2, false);
+    }
+    const int pages = std::max(1, (textLineCount + lines - 1) / lines);
+    const int pageNow = std::min(pages, (textTop + lines - 1) / lines + 1);
+    text(String(pageNow) + "/" + pages, 312, 226, Font::Small, kDim, kBg, 0, MR_DATUM, 2, false);
 }
 
 void renderShare() {
@@ -3022,38 +3245,71 @@ void shareBackToList() {
     dirty = true;
 }
 
-void shareStep(int steps) {
-    if (shareView == ShareView::Text) {
-        textTop += steps * kTextLines;
-        return;
-    }
-    const int n = share::count();
-    if (n == 0) {
-        return;
-    }
-    const int next = std::max(0, std::min(n - 1, shareSel + steps));
-    if (shareView == ShareView::List) {
-        shareSel = next;
-        return;
-    }
+// Previous / next file in the list, from a viewer.
+void shareNeighbour(int step) {
     share::Item it;
-    if (next != shareSel && share::item(next, it)) {   // picture viewer: knob = previous / next file
+    if (share::item(shareSel + step, it)) {
         openShared(it.id);
         clearContent();
     }
 }
 
+void shareStep(int steps) {
+    if (shareView == ShareView::Text) {
+        loadReaderSize();
+        textTop += steps * readerLines();
+        return;
+    }
+    if (shareView == ShareView::Image) {
+        zoomBy(steps > 0 ? 1 : -1);            // knob = zoom
+        return;
+    }
+    const int n = share::count();
+    if (n > 0) {
+        shareSel = std::max(0, std::min(n - 1, shareSel + steps));
+    }
+}
+
 Tap shareTouch(int x, int y) {
     if (shareView == ShareView::Image) {
-        shareBackToList();
+        const std::uint32_t now = millis();
+        if (static_cast<std::int32_t>(now - toolbarUntil) < 0 && y >= kToolbarY) {
+            switch (std::min(5, x / 53)) {
+                case 0: shareBackToList(); return Tap::Done;
+                case 1: shareNeighbour(-1); return Tap::Done;
+                case 2: zoomBy(-1); break;
+                case 3: zoomLevel = 0; break;
+                case 4: zoomBy(1); break;
+                default: shareNeighbour(1); return Tap::Done;
+            }
+            toolbarUntil = now + 4000;
+            return Tap::Done;
+        }
+        if (zoomLevel > 0 && viewZw > 0 && viewZh > 0) {   // look at the tapped spot
+            viewCx = static_cast<float>(x - viewOx + viewVx) / viewZw;
+            viewCy = static_cast<float>(y - viewOy + viewVy) / viewZh;
+        }
+        toolbarUntil = now + 4000;
         return Tap::Done;
     }
     if (y < kBar) {
         return Tap::None;
     }
     if (shareView == ShareView::Text) {
-        textTop += (y < (kBar + kHeight) / 2 ? -1 : 1) * kTextLines;
-        return Tap::Repeat;
+        loadReaderSize();
+        if (kTextSmaller.contains(x, y)) {
+            setReaderSize(readerSize - 1);
+            return Tap::Done;
+        }
+        if (kTextBigger.contains(x, y)) {
+            setReaderSize(readerSize + 1);
+            return Tap::Done;
+        }
+        if (y < 211) {
+            textTop += (y < (kBar + 211) / 2 ? -1 : 1) * readerLines();
+            return Tap::Repeat;
+        }
+        return Tap::None;
     }
     if (kShareDelete.contains(x, y)) {
         share::Item it;
@@ -3123,6 +3379,9 @@ void enterPage(Page page) {
     }
     if (page == Page::Game) {
         game::begin();
+    }
+    if (currentPage == Page::Share && page != Page::Share) {
+        freeZoomCache();                 // up to 2.4 MB of PSRAM for a zoomed picture
     }
     if (page == Page::Share) {
         shareDelConfirm = false;
