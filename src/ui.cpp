@@ -2915,8 +2915,8 @@ void drawImageToolbar() {
         const int cx = x + 25;
         const int cy = kToolbarY + 19;
         if (i == 1 || i == 5) {                // previous / next picture
-            const int d = i == 1 ? -1 : 1;
-            gfx->fillTriangle(cx + 5 * d, cy - 7, cx + 5 * d, cy + 7, cx - 6 * d, cy, kFg);
+            const int d = i == 1 ? -1 : 1;     // tip towards the direction: ◀ previous, ▶ next
+            gfx->fillTriangle(cx - 5 * d, cy - 7, cx - 5 * d, cy + 7, cx + 6 * d, cy, kFg);
         } else {
             const char* label = i == 0 ? tr("返回", "Back") : i == 2 ? "−" : i == 4 ? "+" : kZoomText[zoomLevel];
             text(label, cx, cy + 1, i == 2 || i == 4 ? Font::Large : Font::Small, kFg, face, 0, MC_DATUM, 2, false);
@@ -2987,8 +2987,10 @@ void layoutText(const char* data, std::size_t size) {
     }
     std::uint32_t lineStart = static_cast<std::uint32_t>(p - data);
     std::uint32_t breakAt = lineStart;  // after the last space / non-Latin character on this line
+    std::uint32_t prevAt = lineStart;   // start of the previous character on this line
     int width = 0;
     int widthAtBreak = 0;
+    int prevAdv = 0;
     while (p < end) {
         const char* at = p;
         const std::uint32_t code = textfont::decode(p, end);
@@ -2996,13 +2998,14 @@ void layoutText(const char* data, std::size_t size) {
             if (!pushTextLine(lineStart)) {
                 return;
             }
-            lineStart = breakAt = static_cast<std::uint32_t>(p - data);
-            width = widthAtBreak = 0;
+            lineStart = breakAt = prevAt = static_cast<std::uint32_t>(p - data);
+            width = widthAtBreak = prevAdv = 0;
             continue;
         }
         if (code == '\r') {
             continue;
         }
+        const std::uint32_t here = static_cast<std::uint32_t>(at - data);
         const int adv = textfont::advance(code == '\t' ? ' ' : code, style);
         if (width > 0 && width + adv > kTextW && !(noLineStart(code) && width + adv <= kTextHang)) {
             if (!pushTextLine(lineStart)) {
@@ -3011,14 +3014,19 @@ void layoutText(const char* data, std::size_t size) {
             if (latinWordChar(code) && breakAt > lineStart) {
                 lineStart = breakAt;            // the word in progress moves down whole
                 width -= widthAtBreak;
+            } else if (noLineStart(code) && prevAt > lineStart) {
+                lineStart = prevAt;             // too wide to hang: the last character comes along
+                width = prevAdv;
             } else {
-                lineStart = static_cast<std::uint32_t>(at - data);
+                lineStart = here;
                 width = 0;
             }
             breakAt = lineStart;
             widthAtBreak = 0;
         }
         width += adv;
+        prevAt = here;
+        prevAdv = adv;
         if (!latinWordChar(code)) {
             breakAt = static_cast<std::uint32_t>(p - data);
             widthAtBreak = width;
