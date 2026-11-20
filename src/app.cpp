@@ -436,8 +436,12 @@ String memoryReport() {
     // HEAP = internal RAM (free/total), PSRAM = external 8 MB; MIN = lowest free since boot, BLOCK = largest free piece
     String out = String("MEM ") + heapLine("HEAP", MALLOC_CAP_INTERNAL) + " " + heapLine("PSRAM", MALLOC_CAP_SPIRAM);
 
+    static std::uint32_t appBytes = 0;
+    if (appBytes == 0) {
+        appBytes = ESP.getSketchSize();        // verifies the whole image (~0.2 s), so only once
+    }
     const esp_partition_t* running = esp_ota_get_running_partition();
-    out += String("\nAPP=") + kib(ESP.getSketchSize()) + "/" + kib(running ? running->size : 0);
+    out += String("\nAPP=") + kib(appBytes) + "/" + kib(running ? running->size : 0);
     nvs_stats_t nvs = {};
     if (nvs_get_stats(nullptr, &nvs) == ESP_OK) {
         out += String(" NVS=") + static_cast<unsigned>(nvs.used_entries) + "/" + static_cast<unsigned>(nvs.total_entries)
@@ -446,6 +450,7 @@ String memoryReport() {
     out += String(" UP=") + static_cast<unsigned>(millis() / 1000UL) + " LOOP=" + static_cast<unsigned>(loopRateHz)
         + "Hz MAXLOOP=" + String(loopMaxUs / 1000.0f, 1) + "ms";
     loopMaxUs = 0;
+    lastLoopUs = 0;                            // the iteration running this report is not counted
 
     out += "\nPART";
     appendPartitions(out, ESP_PARTITION_TYPE_APP);
