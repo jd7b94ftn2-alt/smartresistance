@@ -150,32 +150,55 @@ void startNetworkServices() {
     webServer.on("/api/cmd", []() {
         webServer.send(200, "text/plain", app::handleCommand(webServer.arg("c")));
     });
-    // Shared picture / text: POST /api/upload?kind=IMG|TXT&size=<bytes>&name=<name>, multipart file field.
+    // Shared picture / text: POST /api/upload, multipart form with a file field (any field name).
+    // Optional: kind=IMG|TXT, size=<bytes>, name=<name> as URL or form fields. Without them (iPhone
+    // Shortcuts) the kind comes from the part's type / file name and the size from what arrives.
+    // A form field "text" without a file is stored as a text file.
     static String uploadError;
     static int uploadId = -1;
     static bool uploadFailed = false;
+    static bool uploadSeen = false;
     webServer.on("/api/upload", HTTP_POST, []() {
+        if (!uploadSeen && webServer.hasArg("text") && webServer.arg("text").length() > 0) {
+            const String body = webServer.arg("text");
+            const String name = webServer.arg("name").length() > 0 ? webServer.arg("name") : String("文本");
+            uploadError = "";
+            uploadId = -1;
+            if (share::beginUpload(share::Kind::Text, body.length(), name, uploadError)
+                && share::writeUpload(reinterpret_cast<const std::uint8_t*>(body.c_str()), body.length())) {
+                uploadId = share::finishUpload(uploadError);
+            }
+        }
+        uploadSeen = false;
         if (uploadId >= 0) {
             webServer.send(200, "text/plain", String("OK ID=") + uploadId);
         } else {
             webServer.send(400, "text/plain", String("ERR ") + (uploadError.length() ? uploadError : String("no file")));
         }
+        uploadId = -1;
     }, []() {
         HTTPUpload& up = webServer.upload();
         if (up.status == UPLOAD_FILE_START) {
+            uploadSeen = true;
             uploadId = -1;
             uploadError = "";
-            const share::Kind kind = webServer.arg("kind").equalsIgnoreCase("TXT") ? share::Kind::Text : share::Kind::Image;
-            uploadFailed = !share::beginUpload(kind, static_cast<std::uint32_t>(webServer.arg("size").toInt()),
-                webServer.arg("name"), uploadError);
+            const String kindArg = webServer.arg("kind");
+            String file = up.filename;
+            file.toLowerCase();
+            const bool text = kindArg.length() > 0 ? kindArg.equalsIgnoreCase("TXT")
+                                                   : (up.type.startsWith("text/") || file.endsWith(".txt"));
+            const String name = webServer.arg("name").length() > 0 ? webServer.arg("name") : up.filename;
+            uploadFailed = !share::beginUpload(text ? share::Kind::Text : share::Kind::Image,
+                static_cast<std::uint32_t>(webServer.arg("size").toInt()), name, uploadError);
         } else if (up.status == UPLOAD_FILE_WRITE) {
             if (!uploadFailed && !share::writeUpload(up.buf, up.currentSize)) {
                 uploadFailed = true;
-                uploadError = "more data than size";
+                uploadError = "file too big (picture <= 400 KB, text <= 1 MB)";
                 share::abortUpload();
             }
         } else if (up.status == UPLOAD_FILE_END) {
             if (!uploadFailed) {
+                share::renameUpload(webServer.arg("name"));    // a name field after the file part
                 uploadId = share::finishUpload(uploadError);
             }
         } else if (up.status == UPLOAD_FILE_ABORTED) {

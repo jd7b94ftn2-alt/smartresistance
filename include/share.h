@@ -33,10 +33,12 @@ struct Item {
 void begin();                          // mounts the file system (formats it on first use)
 String handleCommand(const String& cmd, const String* tokens, int count);
 
-// Streaming upload (HTTP); the line commands use the same path.
+// Streaming upload (HTTP); the line commands use the same path. size 0 = not known in advance (iPhone
+// Shortcuts): room for the largest file is reserved and the real size is taken at the end.
 bool beginUpload(Kind kind, std::uint32_t size, const String& name, String& error);
 bool writeUpload(const std::uint8_t* data, std::size_t length);
-int finishUpload(String& error);       // new id, or -1
+void renameUpload(const String& name);
+int finishUpload(String& error);       // new id, or -1 (pictures must be JPEG)
 void abortUpload();
 
 int count();

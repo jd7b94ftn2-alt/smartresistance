@@ -29,6 +29,7 @@ std::uint32_t rxReceived = 0;
 Kind rxKind = Kind::Image;
 String rxName;
 bool rxActive = false;
+bool rxOpenSize = false;               // size was not given: rxSize is the limit until the end
 
 // last loaded file
 std::uint8_t* view = nullptr;
@@ -113,6 +114,7 @@ void releaseRx() {
     }
     rx = nullptr;
     rxActive = false;
+    rxOpenSize = false;
     rxReceived = 0;
     rxSize = 0;
 }
@@ -159,7 +161,11 @@ bool beginUpload(Kind kind, std::uint32_t size, const String& name, String& erro
         return false;
     }
     const std::uint32_t limit = kind == Kind::Image ? kMaxImageBytes : kMaxTextBytes;
-    if (size == 0 || size > limit) {
+    rxOpenSize = size == 0;
+    if (rxOpenSize) {
+        size = limit;
+    }
+    if (size > limit) {
         error = String("size 1..") + limit;
         return false;
     }
@@ -193,13 +199,38 @@ bool writeUpload(const std::uint8_t* data, std::size_t length) {
     return true;
 }
 
+void renameUpload(const String& name) {
+    if (rxActive && name.length() > 0) {
+        rxName = name.length() > 80 ? name.substring(0, 80) : name;
+        rxName.replace("\n", " ");
+    }
+}
+
 int finishUpload(String& error) {
     if (!rxActive) {
         error = "no upload in progress";
         return -1;
     }
+    if (rxOpenSize) {                      // size not given: take what arrived, give the rest back
+        rxOpenSize = false;
+        if (rxReceived == 0) {
+            error = "empty file";
+            abortUpload();
+            return -1;
+        }
+        rxSize = rxReceived;
+        void* smaller = heap_caps_realloc(rx, rxSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (smaller != nullptr) {
+            rx = static_cast<std::uint8_t*>(smaller);
+        }
+    }
     if (rxReceived != rxSize) {
         error = String("incomplete ") + rxReceived + "/" + rxSize;
+        abortUpload();
+        return -1;
+    }
+    if (rxKind == Kind::Image && !(rxSize > 3 && rx[0] == 0xFF && rx[1] == 0xD8 && rx[2] == 0xFF)) {
+        error = "not a JPEG (Shortcuts: add 'Convert Image' to JPEG first)";
         abortUpload();
         return -1;
     }

@@ -2857,10 +2857,9 @@ bool decodeToCache(const std::uint8_t* data, std::size_t size, int scale) {
     return ok;
 }
 
-// zoomBuf (each pixel repeated `up` times) -> the screen, centred or panned to viewCx / viewCy.
-void blitZoom(int up) {
-    const int zw = zoomW * up;
-    const int zh = zoomH * up;
+// zoomBuf shown at zw x zh screen pixels (nearest-pixel scaling, any ratio), centred or panned to
+// viewCx / viewCy.
+void blitZoom(int zw, int zh) {
     int vx = 0;
     int vy = 0;
     int ox = 0;
@@ -2886,17 +2885,20 @@ void blitZoom(int up) {
     gfx->fillRect(0, 0, kWidth, kHeight, TFT_BLACK);
     const int cols = std::min(kWidth - ox, zw - vx);
     const int rows = std::min(kHeight - oy, zh - vy);
+    const std::uint32_t stepX = (static_cast<std::uint32_t>(zoomW) << 16) / static_cast<std::uint32_t>(zw);   // 16.16
+    const std::uint32_t stepY = (static_cast<std::uint32_t>(zoomH) << 16) / static_cast<std::uint32_t>(zh);
     static std::uint16_t row[kWidth];
     for (int r = 0; r < rows; ++r) {
-        const std::uint16_t* src = zoomBuf + static_cast<std::size_t>((vy + r) / up) * zoomW;
+        const int sy = std::min(zoomH - 1, static_cast<int>((static_cast<std::uint32_t>(vy + r) * stepY) >> 16));
+        const std::uint16_t* src = zoomBuf + static_cast<std::size_t>(sy) * zoomW;
         std::uint16_t* dst = gfx == &canvas
             ? static_cast<std::uint16_t*>(canvas.getPointer()) + static_cast<std::size_t>(oy + r) * kWidth + ox
             : row;
-        if (up == 1) {
+        if (stepX == 0x10000U) {
             memcpy(dst, src + vx, static_cast<std::size_t>(cols) * 2);
         } else {
             for (int c = 0; c < cols; ++c) {
-                dst[c] = src[(vx + c) / up];
+                dst[c] = src[std::min(zoomW - 1, static_cast<int>((static_cast<std::uint32_t>(vx + c) * stepX) >> 16))];
             }
         }
         if (gfx != &canvas) {
@@ -3167,15 +3169,18 @@ void renderShareImage() {
     bool ok = share::load(shareId, data, size) && pictureSize(data, size);
     crumb(2);
     if (ok) {
-        int fit = 1;                              // decode scale that fits the screen
-        while (fit < 8 && (imageW / fit > kWidth || imageH / fit > kHeight)) {
-            fit *= 2;
+        // 1x = the whole picture just fits the screen (any aspect ratio); 2x / 4x of that. Decode at
+        // the coarsest 1/2^n that still has at least the shown pixels, then scale to the exact size.
+        const float fit = std::min(static_cast<float>(kWidth) / imageW, static_cast<float>(kHeight) / imageH);
+        const float mag = fit * static_cast<float>(1 << zoomLevel);
+        const int shownW = std::max(1, static_cast<int>(lroundf(imageW * mag)));
+        const int shownH = std::max(1, static_cast<int>(lroundf(imageH * mag)));
+        int scale = 1;
+        while (scale < 8 && imageW / (scale * 2) >= shownW && imageH / (scale * 2) >= shownH) {
+            scale *= 2;
         }
-        const int mag = 1 << zoomLevel;
-        const int scale = std::max(1, fit / mag);  // more detail from the file while there is some...
-        const int up = std::max(1, mag / fit);     // ...then pixels get bigger
         if (zoomFile != shareId || zoomScale != scale) {
-            if (zoomFile == shareId && scale < fit) {
+            if (zoomFile == shareId) {
                 text(tr("放大中…", "Zooming…"), kWidth / 2, kHeight / 2, Font::Large, kWhite, kBarColor, 8, MC_DATUM, 2);
                 present();
             }
@@ -3184,7 +3189,7 @@ void renderShareImage() {
             crumb(4);
         }
         if (ok) {
-            blitZoom(up);
+            blitZoom(shownW, shownH);
             if (bar) {
                 drawImageToolbar();
             }
